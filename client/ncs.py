@@ -107,3 +107,5 @@ def resurrect_slot(slot):
 # Templates whose models were seen to load in the prologue area. Spawning a template whose model the
 # current area has not loaded triggers an engine assert ("Model not found") and the game closes.
 SAFE_TEMPLATES = {"j00h_abbot0"}
+def set_slot_commandable(slot, on):  # SetCommandable(bCommandable, oTarget): push oTarget, then bCommandable on top
+    return void_main(slot_push(slot) + CONSTI(1 if on else 0) + ACTION(R["SetCommandable"], 2))

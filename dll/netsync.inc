@@ -47,7 +47,7 @@ static void n_finish(Ncs *s) {
 enum { R_EXECUTESCRIPT = 8, R_ACTIONMOVETOLOCATION = 21, R_GETAREA = 24, R_GETPOSITION = 27, R_GETISOBJECTVALID = 42,
        R_GETISDEAD = 140, R_LOCATION = 215, R_APPLYEFFECT = 220, R_FLOATTOINT = 231, R_CREATEOBJECT = 243,
        R_JUMPTOLOCATION = 313, R_GETPLAYER = 548, R_GETLOCALOBJECT = 54, R_SETLOCALOBJECT = 58,
-       R_EFFECTRESURRECTION = 82, R_SETOBJECTACTIVE = 756 };
+       R_EFFECTRESURRECTION = 82, R_SETOBJECTACTIVE = 756, R_SETCOMMANDABLE = 162 };
 #define NET_SLOT 192   /* local object slot on the player that holds the puppet */
 static void n_push_puppet(Ncs *s) { n_consti(s, NET_SLOT); n_action(s, R_GETPLAYER, 0); n_action(s, R_GETLOCALOBJECT, 2); }
 static void n_void_main_begin(Ncs *s) { n_begin(s); n_jsr(s, 8); n_retn(s); }
@@ -77,6 +77,7 @@ static float g_ordX, g_ordY; static int g_haveOrder;
 static int g_puppetState; /* 0 none, 1 alive */
 static int g_netErr;
 static volatile int32_t g_lastSent[3];
+static uint32_t g_stuckSince, g_stuckJumps; static float g_bestD;
 static int g_netPaused;
 static int g_netArmed;  /* nothing runs until je.netStart (scripts during early start-up crashed v0.6) */
 static int g_crumbs;    /* first-run breadcrumbs written to jebridge.log */
@@ -147,7 +148,10 @@ static int net_spawn_puppet(float x, float y, float z) {
 }
 static void net_order(float x, float y, float z, int run, int jump) {
     Ncs s; n_void_main_begin(&s);
-    if (jump) { n_consti(&s, 1); n_constf(&s, 0.0f); n_constf(&s, x); n_constf(&s, y); n_constf(&s, z);
+    /* The remote player's puppet must always obey: a jump also restores commandability
+       (SetCommandable(TRUE, OBJECT_SELF): push OBJECT_SELF, then TRUE). */
+    if (jump) { n_consti(&s, 0); s.b[s.n - 6 + 1] = 0x06; n_consti(&s, 1); n_action(&s, R_SETCOMMANDABLE, 2);
+                n_consti(&s, 1); n_constf(&s, 0.0f); n_constf(&s, x); n_constf(&s, y); n_constf(&s, z);
                 n_consti(&s, 0); /* OBJECT_SELF */ s.b[s.n - 6 + 1] = 0x06; /* CONSTO */
                 n_action(&s, R_GETAREA, 1); n_action(&s, R_LOCATION, 3); n_action(&s, R_JUMPTOLOCATION, 2); }
     else      { n_consti(&s, -1); n_consti(&s, run); n_constf(&s, 0.0f); n_constf(&s, x); n_constf(&s, y); n_constf(&s, z);
@@ -246,7 +250,16 @@ static void net_tick(void) {
     float gx = g_rx - 1.0f, gy = g_ry;                     /* stand 1 m beside the remote player */
     float d2 = fdist2(fx, fy, g_rx, g_ry);
     if (d2 > 15.0f * 15.0f) { net_order(gx, gy, g_rz, 0, 1); g_ordX = gx; g_ordY = gy; g_haveOrder = 1; return; }
-    if (d2 <= 1.6f * 1.6f) return;
+    if (d2 <= 1.6f * 1.6f) { g_stuckSince = 0; return; }
+    /* Stuck: more than 3 m away and the distance has not shrunk by 0.3 m for 2 s (e.g. pathing
+       blocked by fences): jump next to the remote player instead of walking. */
+    if (d2 > 3.0f * 3.0f) {
+        float d = 0; { float lo = 0, hi = 20; for (int it = 0; it < 24; it++) { float m = (lo + hi) / 2; if (m * m < d2) lo = m; else hi = m; } d = lo; }
+        if (!g_stuckSince || d < g_bestD - 0.3f) { g_stuckSince = now; g_bestD = d; }
+        else if (now - g_stuckSince > 2000) {
+            net_order(gx, gy, g_rz, 0, 1); g_ordX = gx; g_ordY = gy; g_haveOrder = 1; g_stuckJumps++; g_stuckSince = 0; return;
+        }
+    } else g_stuckSince = 0;
     if (!g_haveOrder || fdist2(gx, gy, g_ordX, g_ordY) > 0.5f * 0.5f) {
         net_order(gx, gy, g_rz, d2 > 16.0f, 0); g_ordX = gx; g_ordY = gy; g_haveOrder = 1;
     }
@@ -265,6 +278,7 @@ static void net_status(char *out) {
     s_cat(out, ",\"moves\":"); u2s(a, g_moves); s_cat(out, a);
     s_cat(out, ",\"jumps\":"); u2s(a, g_jumps); s_cat(out, a);
     s_cat(out, ",\"lastSentMm\":["); i2s(a, g_lastSent[0]); s_cat(out, a); s_cat(out, ","); i2s(a, g_lastSent[1]); s_cat(out, a); s_cat(out, ","); i2s(a, g_lastSent[2]); s_cat(out, a); s_cat(out, "]");
+    s_cat(out, ",\"stuckJumps\":"); u2s(a, g_stuckJumps); s_cat(out, a);
     s_cat(out, ",\"vmBusySkips\":"); u2s(a, g_vmBusySkips); s_cat(out, a);
     s_cat(out, ",\"remoteMm\":["); i2s(a, g_rxm); s_cat(out, a); s_cat(out, ",");
     i2s(a, g_rym); s_cat(out, a); s_cat(out, ","); i2s(a, g_rzm); s_cat(out, a); s_cat(out, "]");
