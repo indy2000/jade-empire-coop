@@ -44,7 +44,7 @@ static void n_finish(Ncs *s) {
     s->b[9] = s->n >> 24; s->b[10] = s->n >> 16; s->b[11] = s->n >> 8; s->b[12] = s->n;
 }
 /* routine numbers: Jade Empire nwscript.nss declaration order */
-enum { R_EXECUTESCRIPT = 8, R_ACTIONMOVETOLOCATION = 21, R_GETAREA = 24, R_GETPOSITION = 27, R_GETISOBJECTVALID = 42,
+enum { R_CLEARALLACTIONS = 9, R_EXECUTESCRIPT = 8, R_ACTIONMOVETOLOCATION = 21, R_GETAREA = 24, R_GETPOSITION = 27, R_GETISOBJECTVALID = 42,
        R_GETISDEAD = 140, R_LOCATION = 215, R_APPLYEFFECT = 220, R_FLOATTOINT = 231, R_CREATEOBJECT = 243,
        R_JUMPTOLOCATION = 313, R_GETPLAYER = 548, R_GETLOCALOBJECT = 54, R_SETLOCALOBJECT = 58,
        R_EFFECTRESURRECTION = 82, R_SETOBJECTACTIVE = 756, R_SETCOMMANDABLE = 162 };
@@ -81,6 +81,11 @@ static int g_puppetState; /* 0 none, 1 alive */
 static int g_netErr;
 static volatile int32_t g_lastSent[3];
 static uint32_t g_stuckSince, g_stuckJumps; static float g_bestD;
+/* 0.7.2 follow tuning. g_tune bits (je.netTune, for A/B tests): 1 = old cadence (one script per frame),
+   2 = old follow (walk until 4 m behind, no lead). */
+static int g_tune;
+static float g_rvx, g_rvy;            /* remote player velocity, m/s, from received positions */
+static int g_ordRun;
 static int g_netPaused;
 static int g_netArmed;  /* nothing runs until je.netStart (scripts during early start-up crashed v0.6) */
 static int g_crumbs;    /* first-run breadcrumbs written to jebridge.log */
@@ -151,6 +156,9 @@ static int net_spawn_puppet(float x, float y, float z) {
 }
 static void net_order(float x, float y, float z, int run, int jump) {
     Ncs s; n_void_main_begin(&s);
+    /* 0.7.2: ActionMoveToLocation is queued behind earlier orders; without clearing, the puppet walked
+       every stale waypoint in turn (stop, start) and trailed by seconds. tune bit 4 = keep old queueing. */
+    if (!jump && !(g_tune & 6)) n_action(&s, R_CLEARALLACTIONS, 0);
     /* The remote player's puppet must always obey: a jump also restores commandability
        (SetCommandable(TRUE, OBJECT_SELF): push OBJECT_SELF, then TRUE). */
     if (jump) { n_consti(&s, 0); s.b[s.n - 6 + 1] = 0x06; n_consti(&s, 1); n_action(&s, R_SETCOMMANDABLE, 2);
@@ -199,6 +207,7 @@ static int net_parse_config(void) {
     return 1;
 }
 
+static float fisqrt(float v) { /* 1/sqrt(v), no CRT */ float lo = 0, hi = 1e3f, s = 0; for (int i = 0; i < 40; i++) { s = (lo + hi) / 2; if (s * s * v > 1.0f) hi = s; else lo = s; } return s; }
 static float fdist2(float ax, float ay, float bx, float by) { float dx = ax - bx, dy = ay - by; return dx * dx + dy * dy; }
 
 /* main thread, every frame.
@@ -231,16 +240,25 @@ static void net_tick(void) {
         if (r != 24 || pkt[0] != 'J' || pkt[1] != 'E' || pkt[2] != 'C' || pkt[3] != '1') { g_bad++; continue; }
         { int32_t v; memcpy(&v, pkt + 8, 4); g_rxm = v; memcpy(&v, pkt + 12, 4); g_rym = v; memcpy(&v, pkt + 16, 4); g_rzm = v; }
         uint32_t flags; memcpy(&flags, pkt + 20, 4); g_rvalid = flags & 1; g_haveRemote = 1; g_recv++; g_lastRecvTick = now;
+        { static int32_t vx0, vy0; static uint32_t vt0;            /* velocity over >= 200 ms windows */
+          if (!vt0 || now - vt0 > 1500) { vx0 = g_rxm; vy0 = g_rym; vt0 = now; g_rvx = g_rvy = 0; }
+          else if (now - vt0 >= 150) { float dt = (now - vt0) / 1000.0f;   /* smoothed: packets arrive bunched */
+                                       g_rvx = 0.5f * g_rvx + 0.5f * ((g_rxm - vx0) / 1000.0f / dt); g_rvy = 0.5f * g_rvy + 0.5f * ((g_rym - vy0) / 1000.0f / dt);
+                                       vx0 = g_rxm; vy0 = g_rym; vt0 = now; } }
         CRUMB(128, "net: first packet received");
     }
     g_stage = "net idle";
     if (g_netPaused) return;
-    if (g_step == 0) { if (now - g_lastSendTick < 66) return; g_lastSendTick = now; }
+    if (now - g_lastRecvTick > 600) g_rvx = g_rvy = 0;        /* no fresh data: do not extrapolate */
+    if (g_step == 0) { if (now - g_lastSendTick < 50) return; g_lastSendTick = now; }
+    int split = g_tune & 1;   /* 0.7.2: player x,y,z in one frame, puppet x,y,z in the next (was 7 frames) */
     static const char *const names[7] = { "jbn_pcok", "jbn_p0", "jbn_p1", "jbn_p2", "jbn_q0", "jbn_q1", "jbn_q2" };
     if (g_step <= 3) {
         CRUMB(4, "net: first player eval");
-        if (!vm_eval(names[g_step], (int *)&g_pv[g_step]) || (g_step == 0 && !g_pv[0])) { g_step = 0; return; }
-        if (++g_step <= 3) return;
+        while (g_step <= 3) {
+            if (!vm_eval(names[g_step], (int *)&g_pv[g_step]) || (g_step == 0 && !g_pv[0])) { g_step = 0; return; }
+            if (++g_step <= 3 && split) return;
+        }
         /* step 3 done: send */
         CRUMB(8, "net: first player position read");
         char pkt[24]; uint32_t fl = 1; int32_t v;
@@ -261,16 +279,28 @@ static void net_tick(void) {
         return;                                   /* puppet position from the next frame on */
     }
     if (g_step <= 6) {
-        if (!vm_eval(names[g_step], (int *)&g_pv[g_step])) { g_puppetState = 0; g_step = 0; return; }
-        if (++g_step <= 6) return;
+        while (g_step <= 6) {
+            if (!vm_eval(names[g_step], (int *)&g_pv[g_step])) { g_puppetState = 0; g_step = 0; return; }
+            if (++g_step <= 6 && split) return;
+        }
     }
     g_step = 0;
     CRUMB(64, "net: first puppet drive");
     float fx = g_pv[4] / 1000.0f, fy = g_pv[5] / 1000.0f;
-    float gx = g_rx - 1.0f, gy = g_ry;                     /* stand 1 m beside the remote player */
-    float d2 = fdist2(fx, fy, g_rx, g_ry);
+    int old = g_tune & 2;
+    float sp2 = g_rvx * g_rvx + g_rvy * g_rvy;
+    /* Lead: aim where the remote player will be in ~0.3 s (network + order delay), at most 2 m ahead. */
+    float lx = 0, ly = 0;
+    if (!old && sp2 > 1.0f) { lx = g_rvx * 0.5f; ly = g_rvy * 0.5f; float l2 = lx * lx + ly * ly; if (l2 > 9.0f) { float k = 3.0f * fisqrt(l2); lx *= k; ly *= k; } }
+    float tx = g_rx + lx, ty = g_ry + ly;
+    float gx = tx - 1.0f, gy = ty;                         /* stand 1 m beside the remote player */
+    float d2 = fdist2(fx, fy, tx, ty);
+    /* Run when the remote player runs (> 2.5 m/s) or when more than 2.5 m behind (was: only > 4 m). */
+    /* With hysteresis: a flickering speed estimate made the puppet restart its order again and again. */
+    int run = old ? d2 > 16.0f
+                  : (g_ordRun ? !(sp2 < 1.0f && d2 < 1.8f * 1.8f) : (sp2 > 2.0f * 2.0f || d2 > 2.5f * 2.5f));
     if (d2 > 15.0f * 15.0f) { net_order(gx, gy, g_rz, 0, 1); g_ordX = gx; g_ordY = gy; g_haveOrder = 1; return; }
-    if (d2 <= 1.6f * 1.6f) { g_stuckSince = 0; return; }
+    if (d2 <= 1.6f * 1.6f && (old || sp2 < 1.0f)) { g_stuckSince = 0; return; }
     /* Stuck: more than 3 m away and the distance has not shrunk by 0.3 m for 2 s (e.g. pathing
        blocked by fences): jump next to the remote player instead of walking. */
     if (d2 > 3.0f * 3.0f) {
@@ -280,8 +310,13 @@ static void net_tick(void) {
             net_order(gx, gy, g_rz, 0, 1); g_ordX = gx; g_ordY = gy; g_haveOrder = 1; g_stuckJumps++; g_stuckSince = 0; return;
         }
     } else g_stuckSince = 0;
-    if (!g_haveOrder || fdist2(gx, gy, g_ordX, g_ordY) > 0.5f * 0.5f) {
-        net_order(gx, gy, g_rz, d2 > 16.0f, 0); g_ordX = gx; g_ordY = gy; g_haveOrder = 1;
+    /* New orders: old mode on every 0.5 m target change; new mode when the target moved 1.5 m, the run
+       flag changed, or the puppet already reached the last order point (fewer restarts). */
+    int reorder = old ? fdist2(gx, gy, g_ordX, g_ordY) > 0.5f * 0.5f
+                      : (fdist2(gx, gy, g_ordX, g_ordY) > 1.5f * 1.5f || (run && !g_ordRun) ||
+                         (fdist2(fx, fy, g_ordX, g_ordY) < 1.0f && fdist2(gx, gy, g_ordX, g_ordY) > 0.3f * 0.3f));
+    if (!g_haveOrder || reorder) {
+        net_order(gx, gy, g_rz, run, 0); g_ordX = gx; g_ordY = gy; g_haveOrder = 1; g_ordRun = run;
     }
 }
 
@@ -298,6 +333,8 @@ static void net_status(char *out) {
     s_cat(out, ",\"moves\":"); u2s(a, g_moves); s_cat(out, a);
     s_cat(out, ",\"jumps\":"); u2s(a, g_jumps); s_cat(out, a);
     s_cat(out, ",\"lastSentMm\":["); i2s(a, g_lastSent[0]); s_cat(out, a); s_cat(out, ","); i2s(a, g_lastSent[1]); s_cat(out, a); s_cat(out, ","); i2s(a, g_lastSent[2]); s_cat(out, a); s_cat(out, "]");
+    s_cat(out, ",\"tune\":"); u2s(a, (uint32_t)g_tune); s_cat(out, a);
+    s_cat(out, ",\"remoteSpeedMms\":"); u2s(a, (uint32_t)(1000.0f / fisqrt(g_rvx * g_rvx + g_rvy * g_rvy + 1e-6f))); s_cat(out, a);
     s_cat(out, ",\"stuckJumps\":"); u2s(a, g_stuckJumps); s_cat(out, a);
     s_cat(out, ",\"vmBusySkips\":"); u2s(a, g_vmBusySkips); s_cat(out, a);
     s_cat(out, ",\"remoteMm\":["); i2s(a, g_rxm); s_cat(out, a); s_cat(out, ",");

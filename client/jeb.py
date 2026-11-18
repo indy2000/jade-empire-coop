@@ -17,7 +17,10 @@ def call(method, params=None, timeout=10.0):
         if os.path.exists(out):
             time.sleep(0.05)
             txt = open(out).read().strip()
-            if txt: return json.loads(txt)
+            if txt:
+                try: return json.loads(txt)
+                except ValueError: pass      # the DLL is still writing the reply: read again
+
         time.sleep(0.05)
     return {"id": rid, "error": {"code": "client-timeout", "message": "no reply file"}}
 if __name__ == "__main__":

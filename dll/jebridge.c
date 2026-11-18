@@ -156,7 +156,7 @@ static BOOL (WINAPI *g_realPeek)(MSG_*, void*, unsigned, unsigned, unsigned);
 static uint16_t g_port;
 
 typedef struct { char method[48]; char resref[160]; const char *hex; int hexLen; char idtok[32]; uint32_t oid; int ival; int hasIval;
-                 char out[512]; volatile int done; HANDLE ev; DWORD deadline; volatile int abandoned; } Req;
+                 char out[2048]; volatile int done; HANDLE ev; DWORD deadline; volatile int abandoned; } Req;
 #define QMAX 32
 static Req *g_q[QMAX]; static int g_qn;
 
@@ -226,6 +226,10 @@ static void run_on_main(Req *r) {
             count++;
         }
         s_cat(r->out, "]}}"); return;
+    }
+    if (s_eq(r->method, "je.netTune")) {
+        if (!r->hasIval) { s_cpy(r->out, "{\"error\":{\"code\":-32602,\"message\":\"je.netTune requires int param 'value'\"}}"); return; }
+        g_tune = r->ival; g_haveOrder = 0; net_status(r->out); return;
     }
     if (s_eq(r->method, "je.netStart")) { g_netArmed = 1; logline("net: armed by je.netStart"); net_status(r->out); return; }
     if (s_eq(r->method, "je.netPause")) {
@@ -372,11 +376,11 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.7.1\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.7.2\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
-        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.evalMany\"]}}"); return;
+        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.evalMany\"]}}"); return;
     }
     if (!g_hooked) { reply(s, idtok, "{\"error\":{\"code\":-32010,\"message\":\"frame hook not installed\"}}"); return; }
     Req r; memset(&r, 0, sizeof r);

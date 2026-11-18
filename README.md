@@ -32,6 +32,7 @@ This mod does **not** bypass that check: it loads into the game after a normal s
 | Remote-player puppet | spawn → resurrect → walk → deactivate; follows a player across two game instances (automated test 5/5, mutation 1/5) |
 | Game-to-game sync (`dll/netsync.inc`) | each game sends its player position over UDP and drives the other's puppet itself; two copies on one PC over 127.0.0.1: `client/crossnet.py` 9/9, mutation (`je.netPause` on B) all legs fail |
 | Steam transport (`dll/steamnet.inc`, AppID 480 Spacewar relay) | friends-only lobby, session accept limited to lobby members; tested on one PC with a mock `steam_api.dll` (`mock/`): `client/crossnet.py` 13/13, mutation (B paused) all 4 legs fail. **Not yet tested with real Steam between two accounts** |
+| Puppet follow (0.7.2) | clears the puppet's action queue before each order, runs with hysteresis, aims 0.5 s ahead; `client/lagtest.py` (mock Steam, A runs a 6 m square): mean delay after A stops 0.70 s vs 2.39 s for the 0.7.1 behaviour, max gap 3.3 m vs 5.8 m |
 | Combat sync, story sync, level transitions | not started |
 
 ## Layout
