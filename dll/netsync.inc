@@ -208,6 +208,12 @@ static float fdist2(float ax, float ay, float bx, float by) { float dx = ax - bx
 static volatile int g_pv[7];
 static int g_step;
 static void net_tick(void) {
+    /* Players without the bridge client arm net with Ctrl+Shift+N (game window focused, after the
+       save is loaded). One beep = armed. */
+    if (g_netOn && !g_netArmed && *G_APPACTIVE &&
+        (GetAsyncKeyState(0x11) & 0x8000) && (GetAsyncKeyState(0x10) & 0x8000) && (GetAsyncKeyState('N') & 0x8000)) {
+        g_netArmed = 1; logline("net: armed by Ctrl+Shift+N"); MessageBeep(0);
+    }
     if (!g_netOn || !g_netArmed) return;
     CRUMB(1, "net: first armed tick");
     static int built; if (!built) { net_build_static_scripts(); built = 1; CRUMB(2, "net: static scripts built"); }

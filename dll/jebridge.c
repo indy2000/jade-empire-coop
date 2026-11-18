@@ -51,6 +51,8 @@ __declspec(dllimport) int __stdcall recv(SOCKET, char*, int, int);
 __declspec(dllimport) int __stdcall send(SOCKET, const char*, int, int);
 __declspec(dllimport) int __stdcall closesocket(SOCKET);
 __declspec(dllimport) BOOL WINAPI PeekMessageA(MSG_*, void*, unsigned, unsigned, unsigned);
+__declspec(dllimport) short WINAPI GetAsyncKeyState(int);
+__declspec(dllimport) BOOL WINAPI MessageBeep(unsigned);
 __declspec(dllimport) HMODULE WINAPI LoadLibraryA(const char*);
 __declspec(dllimport) void *WINAPI AddVectoredExceptionHandler(unsigned long, long (WINAPI *)(void *));
 typedef struct { DWORD attr; DWORD t[6]; DWORD szHi, szLo, r0, r1; char name[260]; char alt[14]; } FINDDATA;
@@ -370,7 +372,7 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.7.0\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.7.1\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
