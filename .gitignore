@@ -4,3 +4,4 @@ __pycache__/
 *.nss
 *.log
 bridge/
+mock/out/
