@@ -27,3 +27,4 @@ ReadFile@20
 DeleteFileA@4
 MoveFileA@8
 CreateDirectoryA@8
+AddVectoredExceptionHandler@8

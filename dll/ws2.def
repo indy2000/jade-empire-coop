@@ -8,3 +8,6 @@ accept@12
 recv@16
 send@16
 closesocket@4
+sendto@24
+recvfrom@24
+ioctlsocket@12

@@ -52,6 +52,7 @@ __declspec(dllimport) int __stdcall send(SOCKET, const char*, int, int);
 __declspec(dllimport) int __stdcall closesocket(SOCKET);
 __declspec(dllimport) BOOL WINAPI PeekMessageA(MSG_*, void*, unsigned, unsigned, unsigned);
 __declspec(dllimport) HMODULE WINAPI LoadLibraryA(const char*);
+__declspec(dllimport) void *WINAPI AddVectoredExceptionHandler(unsigned long, long (WINAPI *)(void *));
 typedef struct { DWORD attr; DWORD t[6]; DWORD szHi, szLo, r0, r1; char name[260]; char alt[14]; } FINDDATA;
 __declspec(dllimport) HANDLE WINAPI FindFirstFileA(const char*, FINDDATA*);
 __declspec(dllimport) BOOL WINAPI FindNextFileA(HANDLE, FINDDATA*);
@@ -63,12 +64,14 @@ __declspec(dllimport) BOOL WINAPI CreateDirectoryA(const char*, void*);
 __declspec(dllimport) void *WINAPI GetProcAddress(HMODULE, const char*);
 
 /* ---------------- tiny libc ---------------- */
+int _fltused = 0; /* MSVC ABI: marks float use; normally from the CRT */
 static size_t s_len(const char *s) { size_t n = 0; while (s[n]) n++; return n; }
 static void s_cpy(char *d, const char *s) { while ((*d++ = *s++)); }
 static void s_cat(char *d, const char *s) { s_cpy(d + s_len(d), s); }
 static int s_eq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
 void *memset(void *d, int c, size_t n) { unsigned char *p = d; while (n--) *p++ = (unsigned char)c; return d; }
 void *memcpy(void *d, const void *s, size_t n) { unsigned char *a = d; const unsigned char *b = s; while (n--) *a++ = *b++; return d; }
+void *memmove(void *d, const void *s, size_t n) { unsigned char *a = d; const unsigned char *b = s; if (a < b) while (n--) *a++ = *b++; else { a += n; b += n; while (n--) *--a = *--b; } return d; }
 static const char *s_str(const char *h, const char *n) {
     size_t k = s_len(n); for (; *h; h++) { size_t i = 0; while (i < k && h[i] == n[i]) i++; if (i == k) return h; } return 0;
 }
@@ -108,7 +111,7 @@ typedef void (__attribute__((thiscall)) *copy_t)(void *, void *, const void *, u
 /* ---------------- in-memory scripts ---------------- */
 #define MS_MAX 32
 #define MS_POOL 65536
-typedef struct { char name[17]; uint32_t off, len; } MemScript;
+typedef struct { char name[17]; uint32_t off, len, cap; } MemScript;
 static MemScript g_ms[MS_MAX]; static int g_msn; static uint8_t g_pool[MS_POOL]; static uint32_t g_poolUsed;
 static volatile uint32_t g_memLoads;
 static int lc(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
@@ -170,6 +173,28 @@ static int check_game(void) {
     return 1;
 }
 
+/* ---------------- crash breadcrumbs ---------------- */
+/* g_stage names what the bridge is doing on the main thread; a vectored handler logs access
+   violations (first few only) with the faulting address and the current stage. */
+static volatile const char *g_stage = "idle";
+static volatile int g_avLogged;
+static HMODULE g_self;
+static long WINAPI veh(void *ep) {
+    uint32_t **pp = (uint32_t **)ep; uint32_t *rec = pp[0]; uint32_t *ctx = pp[1];
+    if (rec[0] != 0xC0000005 || g_avLogged >= 5) return 0;   /* EXCEPTION_CONTINUE_SEARCH */
+    g_avLogged++;
+    char m[200], a[16];
+    s_cpy(m, "CRASH? access violation at eip "); h2s(a, rec[3]); s_cat(m, a);
+    s_cat(m, " (dll base "); h2s(a, (uint32_t)(uintptr_t)g_self); s_cat(m, a);
+    s_cat(m, ") rw "); u2s(a, rec[5]); s_cat(m, a); s_cat(m, " addr "); h2s(a, rec[6]); s_cat(m, a);
+    s_cat(m, " esp "); h2s(a, ctx[0xC4 / 4]); s_cat(m, a);
+    s_cat(m, " stage "); s_cat(m, (const char *)g_stage);
+    logline(m);
+    return 0;
+}
+
+#include "netsync.inc"
+
 /* ---------------- main-thread work ---------------- */
 static void run_on_main(Req *r) {
     int *app = *G_APP;
@@ -183,6 +208,12 @@ static void run_on_main(Req *r) {
         s_cat(r->out, ",\"debugPanelFlag\":"); u2s(a, (uint32_t)*G_DEBUGPANEL); s_cat(r->out, a);
         s_cat(r->out, ",\"thread\":"); u2s(a, GetCurrentThreadId()); s_cat(r->out, a); s_cat(r->out, ",\"mainThread\":"); u2s(a, g_mainTid); s_cat(r->out, a); s_cat(r->out, "}}");
         return;
+    }
+    if (s_eq(r->method, "je.netStatus")) { net_status(r->out); return; }
+    if (s_eq(r->method, "je.netStart")) { g_netArmed = 1; logline("net: armed by je.netStart"); net_status(r->out); return; }
+    if (s_eq(r->method, "je.netPause")) {
+        if (!r->hasIval) { s_cpy(r->out, "{\"error\":{\"code\":-32602,\"message\":\"je.netPause requires int param 'value'\"}}"); return; }
+        g_netPaused = r->ival != 0; net_status(r->out); return;
     }
     if (s_eq(r->method, "je.keepActive")) {
         if (!r->hasIval) { s_cpy(r->out, "{\"error\":{\"code\":-32602,\"message\":\"je.keepActive requires int param 'value'\"}}"); return; }
@@ -211,7 +242,8 @@ static void run_on_main(Req *r) {
         if (dst[0] != 'N' || dst[1] != 'C' || dst[2] != 'S' || dst[8] != 'B' ||
             (uint32_t)((dst[9] << 24) | (dst[10] << 16) | (dst[11] << 8) | dst[12]) != n) {
             s_cpy(r->out, "{\"error\":{\"code\":-32602,\"message\":\"not an NCS V1.0 file or size mismatch\"}}"); return; }
-        m->off = g_poolUsed; m->len = n; g_poolUsed += n;   /* old bytes of a replaced script are not reclaimed */
+        if (m->cap >= n && m->len) { memmove(g_pool + m->off, dst, n); m->len = n; }
+        else { m->off = g_poolUsed; m->len = n; m->cap = n; g_poolUsed += n; }
         s_cpy(r->out, "{\"result\":{\"ok\":true,\"bytes\":"); u2s(a, n); s_cat(r->out, a);
         s_cat(r->out, ",\"memLoads\":"); u2s(a, g_memLoads); s_cat(r->out, a); s_cat(r->out, "}}"); return;
     }
@@ -261,6 +293,7 @@ static BOOL WINAPI hkPeek(MSG_ *m, void *h, unsigned a, unsigned b, unsigned f) 
         if (t != g_lastFrameTick) { g_frames++; g_lastFrameTick = t; }
         if (g_keepActive) *G_APPACTIVE = 1;
         pump();
+        net_tick();
     }
     return g_realPeek(m, h, a, b, f);
 }
@@ -322,11 +355,11 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.5\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.6\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
-        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\"]}}"); return;
+        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\"]}}"); return;
     }
     if (!g_hooked) { reply(s, idtok, "{\"error\":{\"code\":-32010,\"message\":\"frame hook not installed\"}}"); return; }
     Req r; memset(&r, 0, sizeof r);
@@ -428,6 +461,7 @@ static DWORD WINAPI boot_thread(void *unused) {
       if (kh != (HANDLE)-1) { CloseHandle(kh); g_keepActive = 1; logline("jebridge: keep_active marker found: world keeps running when unfocused"); } }
     CreateThread(0, 0, file_thread, 0, 0, 0);
     WSADATA_ wd; WSAStartup(0x202, &wd);
+    g_netOn = net_parse_config();
     SOCKET ls = socket(2, 1, 6);
     SOCKADDR_IN4 sa; memset(&sa, 0, sizeof sa); sa.sin_family = 2; sa.addr = 0x0100007F; /* 127.0.0.1 */
     uint16_t port = 0;
@@ -494,6 +528,7 @@ BOOL WINAPI DllMain(HMODULE mod, DWORD reason, void *res) {
         size_t n = s_len(g_dir); while (n && g_dir[n-1] != '\\') n--; g_dir[n] = 0;
         InitializeCriticalSection(&g_cs);
         logline("jebridge: loaded");
+        g_self = mod; AddVectoredExceptionHandler(1, veh);
         maybe_multi_instance();
         CreateThread(0, 0, boot_thread, 0, 0, 0);
     }

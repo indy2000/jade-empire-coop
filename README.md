@@ -30,7 +30,8 @@ This mod does **not** bypass that check: it loads into the game after a normal s
 | Keep the world running when unfocused | `je.keepActive` / marker `bridge\keep_active` |
 | Two game copies on one PC | marker `bridge\multi_instance` (per-process single-instance mutex) |
 | Remote-player puppet | spawn → resurrect → walk → deactivate; follows a player across two game instances (automated test 5/5, mutation 1/5) |
-| Networking between PCs, combat sync, story sync | not started |
+| Game-to-game sync (`dll/netsync.inc`) | each game sends its player position over UDP and drives the other's puppet itself; two copies on one PC over 127.0.0.1: `client/crossnet.py` 9/9, mutation (`je.netPause` on B) all legs fail |
+| Networking between PCs (Steam relay), combat sync, story sync | not started |
 
 ## Layout
 
@@ -55,7 +56,9 @@ Never put this into your real game folder. Make a copy of the install and, in th
    Steam otherwise; ownership is still checked).
 2. Rename the copy's `xinput9_1_0.dll` to `xinput_orig.dll`, put `dll/out/xinput9_1_0.dll`
    in its place.
-3. Optional markers in `<copy>\bridge\`: `keep_active`, `multi_instance`.
+3. Optional markers in `<copy>\bridge\`: `keep_active`, `multi_instance`; `net.txt` turns on
+   game-to-game sync (see the header of `dll/netsync.inc`); arm it with `je.netStart` once the
+   player is in game.
 4. Start the copy's `JadeEmpireLauncher.exe` / `JadeEmpire.exe` with Steam running.
    The bridge writes `jebridge.log` and `coopbridge.json` next to the exe.
 
