@@ -370,7 +370,7 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.6.3\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.7.0\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {

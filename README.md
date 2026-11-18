@@ -31,12 +31,15 @@ This mod does **not** bypass that check: it loads into the game after a normal s
 | Two game copies on one PC | marker `bridge\multi_instance` (per-process single-instance mutex) |
 | Remote-player puppet | spawn → resurrect → walk → deactivate; follows a player across two game instances (automated test 5/5, mutation 1/5) |
 | Game-to-game sync (`dll/netsync.inc`) | each game sends its player position over UDP and drives the other's puppet itself; two copies on one PC over 127.0.0.1: `client/crossnet.py` 9/9, mutation (`je.netPause` on B) all legs fail |
-| Networking between PCs (Steam relay), combat sync, story sync | not started |
+| Steam transport (`dll/steamnet.inc`, AppID 480 Spacewar relay) | friends-only lobby, session accept limited to lobby members; tested on one PC with a mock `steam_api.dll` (`mock/`): `client/crossnet.py` 13/13, mutation (B paused) all 4 legs fail. **Not yet tested with real Steam between two accounts** |
+| Combat sync, story sync, level transitions | not started |
 
 ## Layout
 
 - `dll/` — `jebridge.c` (freestanding C, no CRT), `.def` import lists, `build.sh`.
 - `tools/ncsasm.py` — tiny NWScript bytecode (NCS V1.0) assembler used for probe scripts.
+- `mock/` — `steam_api_mock.c`, a fake `steam_api.dll` (flat API subset, UDP on 127.0.0.1) so
+  two game copies on one PC can test the Steam transport; config `steam_mock.txt` in the copy.
 - `client/` — Python client (`jeb.py`, file transport), script builders (`ncs.py`), bot
   helpers (`bot.py`) and the automated tests (`*test*.py`, `crossfollow.py`).
 
@@ -58,7 +61,10 @@ Never put this into your real game folder. Make a copy of the install and, in th
    in its place.
 3. Optional markers in `<copy>\bridge\`: `keep_active`, `multi_instance`; `net.txt` turns on
    game-to-game sync (see the header of `dll/netsync.inc`); arm it with `je.netStart` once the
-   player is in game.
+   player is in game. For Steam: `transport steam`, `role host` (lobby id goes to
+   `bridge\lobby.txt`) or `role join` + `lobby <id>`, and put the 32-bit `steam_api.dll` from
+   Steamworks.NET Standalone 2025.164.1 (SHA-256
+   `fdafb7c65ec7d4182b42bf92cc8671c68e4dc547cc6e613899d2618a47eb65da`) next to the exe.
 4. Start the copy's `JadeEmpireLauncher.exe` / `JadeEmpire.exe` with Steam running.
    The bridge writes `jebridge.log` and `coopbridge.json` next to the exe.
 

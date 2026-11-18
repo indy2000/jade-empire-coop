@@ -63,8 +63,11 @@ static void n_loc(Ncs *s, float x, float y, float z) {
     n_action(s, R_GETPLAYER, 0); n_action(s, R_GETAREA, 1); n_action(s, R_LOCATION, 3);
 }
 
+#include "steamnet.inc"
+
 /* ---- state ---- */
 static int g_netOn;
+static int g_useSteam;
 static SOCKET g_udp = INVALID_SOCKET;
 static SOCKADDR_IN4 g_peer;
 static char g_tpl[24];
@@ -175,9 +178,14 @@ static int net_parse_config(void) {
             const char *q = line + 5; uint32_t parts[4] = {0}; for (int i = 0; i < 4; i++) { parts[i] = s2u(q); while (*q >= '0' && *q <= '9') q++; if (*q == '.') q++; }
             while (*q == ' ') q++; pport = (uint16_t)s2u(q);
             ip = parts[0] | (parts[1] << 8) | (parts[2] << 16) | (parts[3] << 24);
+        } else if (s_str(line, "transport steam") == line) { g_useSteam = 1;
+        } else if (s_str(line, "role host") == line) { g_steamHost = 1;
+        } else if (s_str(line, "role join") == line) { g_steamHost = 0;
+        } else if (s_str(line, "lobby ") == line) { g_wantLobby = s2u64(line + 6);
         } else if (s_str(line, "template ") == line) { int i = 0; const char *q = line + 9; while (*q && *q != ' ' && i < 16) g_tpl[i++] = *q++; g_tpl[i] = 0; }
         *e = save; line = *e ? e + 1 : e;
     }
+    if (g_useSteam) { logline(g_steamHost ? "jebridge: net on: transport steam, role host" : "jebridge: net on: transport steam, role join"); return 1; }
     if (!lport || !pport || !ip) { logline("jebridge: net.txt incomplete (need local, peer)"); return 0; }
     g_udp = socket(2, 2 /*SOCK_DGRAM*/, 17); if (g_udp == INVALID_SOCKET) return 0;
     SOCKADDR_IN4 sa; memset(&sa, 0, sizeof sa); sa.sin_family = 2;
@@ -203,11 +211,16 @@ static void net_tick(void) {
     if (!g_netOn || !g_netArmed) return;
     CRUMB(1, "net: first armed tick");
     static int built; if (!built) { net_build_static_scripts(); built = 1; CRUMB(2, "net: static scripts built"); }
+    if (g_useSteam) {
+        static int started; if (!started) { started = 1; g_stage = "steam start"; if (!steam_start()) { g_netOn = 0; g_stage = "net idle"; return; } }
+        g_stage = "steam pump"; steam_pump();
+    }
     uint32_t now = GetTickCount();
-    g_stage = "recvfrom";
+    g_stage = "recv";
     for (int k = 0; k < 64; k++) {
-        char pkt[64]; SOCKADDR_IN4 from; int fl = sizeof from;
-        int r = recvfrom(g_udp, pkt, sizeof pkt, 0, &from, &fl);
+        char pkt[64]; int r;
+        if (g_useSteam) r = steam_recv(pkt, sizeof pkt);
+        else { SOCKADDR_IN4 from; int fl = sizeof from; r = recvfrom(g_udp, pkt, sizeof pkt, 0, &from, &fl); }
         if (r <= 0) break;
         if (r != 24 || pkt[0] != 'J' || pkt[1] != 'E' || pkt[2] != 'C' || pkt[3] != '1') { g_bad++; continue; }
         { int32_t v; memcpy(&v, pkt + 8, 4); g_rxm = v; memcpy(&v, pkt + 12, 4); g_rym = v; memcpy(&v, pkt + 16, 4); g_rzm = v; }
@@ -229,7 +242,8 @@ static void net_tick(void) {
         v = g_pv[1]; memcpy(pkt + 8, &v, 4); v = g_pv[2]; memcpy(pkt + 12, &v, 4); v = g_pv[3]; memcpy(pkt + 16, &v, 4); memcpy(pkt + 20, &fl, 4);
         g_lastSent[0] = g_pv[1]; g_lastSent[1] = g_pv[2]; g_lastSent[2] = g_pv[3];
         g_stage = "sendto";
-        if (sendto(g_udp, pkt, 24, 0, &g_peer, sizeof g_peer) == 24) g_sent++; else g_netErr++;
+        if (g_useSteam) { uint32_t before = g_sSent, eb = g_sSendErr; steam_send(pkt, 24); if (g_sSent != before) g_sent++; else if (g_sSendErr != eb) g_netErr++; }
+        else if (sendto(g_udp, pkt, 24, 0, &g_peer, sizeof g_peer) == 24) g_sent++; else g_netErr++;
         g_stage = "net idle";
         CRUMB(16, "net: first packet sent");
         if (!g_haveRemote || !g_rvalid || now - g_lastRecvTick > 3000) { g_step = 0; return; }
@@ -283,5 +297,6 @@ static void net_status(char *out) {
     s_cat(out, ",\"remoteMm\":["); i2s(a, g_rxm); s_cat(out, a); s_cat(out, ",");
     i2s(a, g_rym); s_cat(out, a); s_cat(out, ","); i2s(a, g_rzm); s_cat(out, a); s_cat(out, "]");
     s_cat(out, ",\"lastRecvAgoMs\":"); if (g_lastRecvTick) { u2s(a, GetTickCount() - g_lastRecvTick); s_cat(out, a); } else s_cat(out, "-1");
+    if (g_useSteam) steam_status(out);
     s_cat(out, "}}");
 }

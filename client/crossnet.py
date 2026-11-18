@@ -20,6 +20,11 @@ for inst in (A, B): inst(); jeb.call("je.netStart")
 time.sleep(4.0)   # a few send ticks + spawn on both sides
 for inst in (A, B):
     inst(); st = jeb.call("je.netStatus")["result"]; chk("%s net on, sending, receiving" % jeb.D.split("/")[-2], st["on"] and st["sent"] > 0 and st["recv"] > 0, st)
+A(); sa = jeb.call("je.netStatus")["result"].get("steam"); B(); sb = jeb.call("je.netStatus")["result"].get("steam")
+if sa is not None or sb is not None:
+    chk("steam: A hosts a lobby, B joined the same lobby", sa and sb and sa["lobbyState"] == 2 and sb["lobbyState"] == 2 and sa["lobby"] == sb["lobby"] and sa["lobby"] != "0", {"A": sa, "B": sb})
+    chk("steam: host accepted B's session (only lobby members)", sa and sa["accepted"] >= 1, {"accepted": sa and sa["accepted"], "rejected": sa and sa["rejected"]})
+    chk("steam: sender identity read at offset 12", sa and sb and sa["senderAt12"] > 0 and sb["senderAt12"] > 0, {"A12": sa and sa["senderAt12"], "B12": sb and sb["senderAt12"]})
 B(); st = jeb.call("je.netStatus")["result"]; chk("B spawned A's puppet by itself", st["puppet"] == "alive" and st["spawns"] >= 1, st)
 A(); st = jeb.call("je.netStatus")["result"]; chk("A spawned B's puppet by itself", st["puppet"] == "alive" and st["spawns"] >= 1, st)
 # isolate runs: let B's puppet settle next to A's start before anything is measured or paused
