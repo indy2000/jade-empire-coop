@@ -153,7 +153,7 @@ static volatile int g_keepActive;
 static BOOL (WINAPI *g_realPeek)(MSG_*, void*, unsigned, unsigned, unsigned);
 static uint16_t g_port;
 
-typedef struct { char method[48]; char resref[40]; const char *hex; int hexLen; char idtok[32]; uint32_t oid; int ival; int hasIval;
+typedef struct { char method[48]; char resref[160]; const char *hex; int hexLen; char idtok[32]; uint32_t oid; int ival; int hasIval;
                  char out[512]; volatile int done; HANDLE ev; DWORD deadline; volatile int abandoned; } Req;
 #define QMAX 32
 static Req *g_q[QMAX]; static int g_qn;
@@ -210,6 +210,21 @@ static void run_on_main(Req *r) {
         return;
     }
     if (s_eq(r->method, "je.netStatus")) { net_status(r->out); return; }
+    if (s_eq(r->method, "je.evalMany")) {
+        /* params: names "a,b,c" (comma separated, each <=16 chars, max 8). Runs them back to back
+           in this one main-thread call and returns every value (null when a script gave no int). */
+        if (!r->resref[0]) { s_cpy(r->out, "{\"error\":{\"code\":-32602,\"message\":\"je.evalMany requires 'names'\"}}"); return; }
+        s_cpy(r->out, "{\"result\":{\"values\":[");
+        const char *p = r->resref; int first = 1, count = 0;
+        while (*p && count < 8) {
+            char nm[17]; int i = 0; while (*p && *p != ',' && i < 16) nm[i++] = *p++; nm[i] = 0; if (*p == ',') p++;
+            int v = 0; int ok = vm_eval(nm, &v);
+            if (!first) s_cat(r->out, ","); first = 0;
+            if (ok) { i2s(a, v); s_cat(r->out, a); } else s_cat(r->out, "null");
+            count++;
+        }
+        s_cat(r->out, "]}}"); return;
+    }
     if (s_eq(r->method, "je.netStart")) { g_netArmed = 1; logline("net: armed by je.netStart"); net_status(r->out); return; }
     if (s_eq(r->method, "je.netPause")) {
         if (!r->hasIval) { s_cpy(r->out, "{\"error\":{\"code\":-32602,\"message\":\"je.netPause requires int param 'value'\"}}"); return; }
@@ -355,16 +370,17 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.6\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.6.1\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
-        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\"]}}"); return;
+        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.evalMany\"]}}"); return;
     }
     if (!g_hooked) { reply(s, idtok, "{\"error\":{\"code\":-32010,\"message\":\"frame hook not installed\"}}"); return; }
     Req r; memset(&r, 0, sizeof r);
     s_cpy(r.method, method); jstr_field(line, "resref", r.resref, sizeof r.resref);
     if (!r.resref[0]) jstr_field(line, "name", r.resref, sizeof r.resref);
+    if (!r.resref[0]) jstr_field(line, "names", r.resref, sizeof r.resref);
     { const char *h = s_str(line, "\"hex\""); if (h) { h += 5; while (*h == ' ' || *h == ':') h++; if (*h == '"') { h++; r.hex = h; while (h[r.hexLen] && h[r.hexLen] != '"') r.hexLen++; } } }
     r.oid = 0x7F000000; jnum_field(line, "oid", &r.oid);
     { uint32_t v; if (jnum_field(line, "value", &v)) { r.ival = (int)v; r.hasIval = 1; } }

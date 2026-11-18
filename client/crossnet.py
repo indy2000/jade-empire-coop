@@ -12,7 +12,9 @@ NET_SLOT = 192
 def slot_pos(slot):
     for i in range(3): bot.load("jx_s%d" % i, ncs.slot_pos_component(slot, i))
     return tuple(bot.ev("jx_s%d" % i) / 1000 for i in range(3))
-A(); bot.setup(); a0 = bot.pos()
+START = (-68.979, 31.075, 23.284)    # open ground at the save's start point (prologue)
+A(); bot.setup()
+bot.load("jb_act", ncs.jump_self(*START)); bot.run("jb_go"); time.sleep(0.5); a0 = bot.pos()
 B(); bot.setup(); b_player0 = bot.pos()
 for inst in (A, B): inst(); jeb.call("je.netStart")
 time.sleep(4.0)   # a few send ticks + spawn on both sides
@@ -20,6 +22,14 @@ for inst in (A, B):
     inst(); st = jeb.call("je.netStatus")["result"]; chk("%s net on, sending, receiving" % jeb.D.split("/")[-2], st["on"] and st["sent"] > 0 and st["recv"] > 0, st)
 B(); st = jeb.call("je.netStatus")["result"]; chk("B spawned A's puppet by itself", st["puppet"] == "alive" and st["spawns"] >= 1, st)
 A(); st = jeb.call("je.netStatus")["result"]; chk("A spawned B's puppet by itself", st["puppet"] == "alive" and st["spawns"] >= 1, st)
+# isolate runs: let B's puppet settle next to A's start before anything is measured or paused
+B(); jeb.call("je.netPause", {"value": 0})
+t0 = time.time(); settle = None
+while time.time() - t0 < 15:
+    q = slot_pos(NET_SLOT); settle = math.dist(q[:2], a0[:2])
+    if settle <= 1.6: break
+    time.sleep(0.5)
+chk("puppet settled next to A's start (setup)", settle is not None and settle <= 1.6, {"gap_m": round(settle, 2), "seconds": round(time.time() - t0, 1)})
 B(); jeb.call("je.netPause", {"value": 1 if MUT else 0})
 B(); q_start = slot_pos(NET_SLOT)
 prev_a = a0
