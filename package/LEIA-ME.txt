@@ -14,6 +14,9 @@ Precisa de:
 
 INSTALAR (cada jogador, uma vez)
 --------------------------------
+Já tem uma versão anterior? É só rodar o instalar.bat desta versão: ele só
+atualiza os arquivos do co-op (não copia o jogo de novo, os saves ficam).
+
 1. Extraia esta pasta em qualquer lugar (ex.: Downloads).
 2. Dê dois cliques em instalar.bat e espere o "Pronto!".
    Se o Windows avisar que o arquivo veio da internet, clique em
