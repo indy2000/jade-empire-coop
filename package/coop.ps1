@@ -1,4 +1,4 @@
-# Jade Empire Co-op 0.8.0 - instalador e atalhos.
+# Jade Empire Co-op 0.8.1 - instalador e atalhos.
 # Uso: chamado pelos arquivos .bat desta pasta (instalar, hospedar, entrar, mostrar-codigo, desinstalar).
 # Nunca altera a instalacao original do jogo: trabalha numa copia em %USERPROFILE%\JadeEmpireCoop\jogo.
 param([Parameter(Mandatory = $true)][ValidateSet('install', 'host', 'join', 'code', 'uninstall')][string]$Mode)
@@ -9,7 +9,7 @@ $Root = Join-Path $env:USERPROFILE 'JadeEmpireCoop'
 $Dest = Join-Path $Root 'jogo'
 $ExeHash = '0D25F18C028A7DFFFF9DD110B7BE677F7E9B63E1CAD86C1EB8E4E8E189C54FE5'   # JadeEmpire.exe v1.00 build 1510 (Steam)
 $Pins = [ordered]@{
-    'xinput9_1_0.dll' = 'B746F95FEACCAD874500D2DB023773157259558D2C75EEBAA1ABB26E0068C235'   # jebridge 0.8.0
+    'xinput9_1_0.dll' = '22360877E119F587A2454B7443298653EE7041758FBC4A680F85CFEA7CC296D6'   # jebridge 0.8.1
     'steam_api.dll'   = 'FDAFB7C65EC7D4182B42BF92CC8671C68E4DC547CC6E613899D2618A47EB65DA'   # Steamworks.NET Standalone 2025.164.1, x86
 }
 $Template = 'j00h_abbot0'
@@ -70,7 +70,7 @@ function Start-Game {
 
 switch ($Mode) {
     'install' {
-        Say '== Jade Empire Co-op 0.8.0: instalacao =='
+        Say '== Jade Empire Co-op 0.8.1: instalacao =='
         foreach ($n in $Pins.Keys) {
             $p = Join-Path $Here "arquivos\$n"
             if (-not (Test-Path -LiteralPath $p)) { Fail "Falta arquivos\$n no pacote." }

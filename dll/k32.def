@@ -28,3 +28,4 @@ DeleteFileA@4
 MoveFileA@8
 CreateDirectoryA@8
 AddVectoredExceptionHandler@8
+VirtualQuery@12

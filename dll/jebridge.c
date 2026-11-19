@@ -42,6 +42,19 @@ __declspec(dllimport) HANDLE WINAPI CreateEventA(void*, BOOL, BOOL, const char*)
 __declspec(dllimport) BOOL WINAPI SetEvent(HANDLE);
 __declspec(dllimport) DWORD WINAPI WaitForSingleObject(HANDLE, DWORD);
 __declspec(dllimport) BOOL WINAPI IsBadReadPtr(const void*, size_t);
+typedef struct { void *BaseAddress, *AllocationBase; DWORD AllocationProtect; size_t RegionSize; DWORD State, Protect, Type; } MBI_;
+__declspec(dllimport) size_t WINAPI VirtualQuery(const void*, MBI_*, size_t);
+/* Readable without touching the memory (IsBadReadPtr touches it and can trip guard pages: a peek
+   crashed the game in 0.8.1-re). Committed, readable protection, no PAGE_GUARD/NOACCESS. */
+static int mem_readable(uintptr_t a, uint32_t n) {
+    while (n) {
+        MBI_ m; if (!VirtualQuery((void *)a, &m, sizeof m)) return 0;
+        if (m.State != 0x1000 /*MEM_COMMIT*/ || (m.Protect & 0x101) /*NOACCESS|GUARD*/ || !(m.Protect & 0xEE)) return 0;
+        uintptr_t end = (uintptr_t)m.BaseAddress + m.RegionSize; uint32_t k = (uint32_t)(end - a); if (k >= n) return 1;
+        a = end; n -= k;
+    }
+    return 1;
+}
 __declspec(dllimport) int __stdcall WSAStartup(unsigned short, WSADATA_*);
 __declspec(dllimport) SOCKET __stdcall socket(int, int, int);
 __declspec(dllimport) int __stdcall bind(SOCKET, const void*, int);
@@ -227,6 +240,38 @@ static void run_on_main(Req *r) {
         }
         s_cat(r->out, "]}}"); return;
     }
+    if (s_eq(r->method, "je.peek")) {
+        /* RE helper: read up to 512 bytes of game memory. params: oid = address, value = length */
+        uint32_t addr = r->oid, n = r->hasIval ? (uint32_t)r->ival : 64; if (n > 512) n = 512;
+        if (!addr || !mem_readable(addr, n)) { s_cpy(r->out, "{\"error\":{\"code\":-32004,\"message\":\"unreadable\"}}"); return; }
+        s_cpy(r->out, "{\"result\":{\"hex\":\""); char *o = r->out + s_len(r->out); const char *x = "0123456789abcdef";
+        for (uint32_t i = 0; i < n; i++) { uint8_t b = ((uint8_t *)(uintptr_t)addr)[i]; *o++ = x[b >> 4]; *o++ = x[b & 15]; }
+        *o = 0; s_cat(r->out, "\"}}"); return;
+    }
+    if (s_eq(r->method, "je.playerPtr")) {
+        /* RE helper: the player creature as GetPlayer finds it (app+0xA0 -> FUN_00424700) and, by its id,
+           the object GetFacing uses (FUN_004610b0) and the vector GetFacing reads (FUN_00412410). */
+        int *app = *G_APP; void *srv = app ? *(void **)((char *)app + 0xA0) : 0;
+        uint32_t pc = srv ? (uint32_t)(uintptr_t)((getpc_t)0x00424700)(srv) : 0, id = 0, obj = 0, vec = 0;
+        if (pc && mem_readable(pc, 12)) {
+            id = *(uint32_t *)(uintptr_t)(pc + 8);
+            typedef char (__attribute__((thiscall)) *byid_t)(void *, uint32_t *, uint32_t *);
+            uint32_t idc = id, o = 0; char ok = ((byid_t)0x004610b0)(srv, &idc, &o);
+            if (ok == *(char *)0x006e8470 && o) { obj = o; typedef float *(__attribute__((thiscall)) *vec_t)(void *); vec = (uint32_t)(uintptr_t)((vec_t)0x00412410)((void *)(uintptr_t)o); }
+        }
+        char a1[12]; s_cpy(r->out, "{\"result\":{\"creature\":"); u2s(a1, pc); s_cat(r->out, a1);
+        s_cat(r->out, ",\"id\":"); u2s(a1, id); s_cat(r->out, a1); s_cat(r->out, ",\"obj\":"); u2s(a1, obj); s_cat(r->out, a1);
+        s_cat(r->out, ",\"vec\":"); u2s(a1, vec); s_cat(r->out, a1); s_cat(r->out, "}}"); return;
+    }
+    if (s_eq(r->method, "je.testSetDir")) {
+        /* TEST HOOK (test copies): turn the local player by writing its orientation vector (creature+0x50),
+           oid = cos*10000 + 20000, value = sin*10000 + 20000. Scripts cannot turn the player (SetFacing). */
+        int *app = *G_APP; void *srv = app ? *(void **)((char *)app + 0xA0) : 0;
+        uintptr_t pc = srv ? (uintptr_t)((getpc_t)0x00424700)(srv) : 0;
+        if (!pc || !r->hasIval || !mem_readable(pc + 0x50, 8)) { s_cpy(r->out, "{\"error\":{\"code\":-32004,\"message\":\"no player\"}}"); return; }
+        *(float *)(pc + 0x50) = ((int)r->oid - 20000) / 10000.0f; *(float *)(pc + 0x54) = (r->ival - 20000) / 10000.0f;
+        s_cpy(r->out, "{\"result\":{\"ok\":true}}"); return;
+    }
     if (s_eq(r->method, "je.netTune")) {
         if (!r->hasIval) { s_cpy(r->out, "{\"error\":{\"code\":-32602,\"message\":\"je.netTune requires int param 'value'\"}}"); return; }
         g_tune = r->ival; g_haveOrder = 0; net_status(r->out); return;
@@ -359,7 +404,12 @@ static void id_token(const char *line, char *out) {
 /* A sink is either a socket (s != 0) or a buffer (fileOut). */
 static char *g_fileOut; /* set by the file transport thread only (single thread) */
 static void reply(SOCKET s, const char *idtok, const char *body /* {"result":..} or {"error":..} */) {
-    char buf[700]; s_cpy(buf, "{\"id\":"); s_cat(buf, idtok); s_cat(buf, ","); s_cat(buf, body + 1); s_cat(buf, "\n");
+    /* 0.8.1: was char buf[700] - je.netStatus with the Steam block (~950 chars since 0.7.0) and a 512-byte
+       je.peek (1,050 chars) overflowed it and smashed the bridge thread's stack (the peek crashed the game).
+       Req.out is 2048, so 2048 + the id fits; longer bodies are cut, never overflowed. */
+    char buf[2200]; s_cpy(buf, "{\"id\":"); s_cat(buf, idtok); s_cat(buf, ",");
+    { uint32_t room = sizeof buf - s_len(buf) - 2, n = s_len(body + 1); if (n > room) n = room; char *d = buf + s_len(buf); memcpy(d, body + 1, n); d[n] = 0; }
+    s_cat(buf, "\n");
     if (s) send(s, buf, (int)s_len(buf), 0); else if (g_fileOut) s_cat(g_fileOut, buf);
 }
 
@@ -376,11 +426,11 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.8.0\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.8.1\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
-        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.evalMany\"]}}"); return;
+        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.evalMany\"]}}"); return;
     }
     if (!g_hooked) { reply(s, idtok, "{\"error\":{\"code\":-32010,\"message\":\"frame hook not installed\"}}"); return; }
     Req r; memset(&r, 0, sizeof r);
