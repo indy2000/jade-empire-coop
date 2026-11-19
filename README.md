@@ -34,6 +34,7 @@ This mod does **not** bypass that check: it loads into the game after a normal s
 | Steam transport (`dll/steamnet.inc`, AppID 480 Spacewar relay) | friends-only lobby, session accept limited to lobby members; tested on one PC with a mock `steam_api.dll` (`mock/`): `client/crossnet.py` 13/13, mutation (B paused) all 4 legs fail. **Not yet tested with real Steam between two accounts** |
 | Puppet follow (0.7.2) | clears the puppet's action queue before each order, runs with hysteresis, aims 0.5 s ahead; `client/lagtest.py` (mock Steam, A runs a 6 m square): mean delay after A stops 0.70 s vs 2.39 s for the 0.7.1 behaviour, max gap 3.3 m vs 5.8 m |
 | Gait and menus (0.7.3) | puppet walks when the remote player walks, runs when he runs (speed over 0.5 s, hysteresis): `client/gaittest.py` 4/4, mutation (0.7.2 rule) 2/4; net scripts wait while there is no player (fixes "Quit game" closing the game) |
+| Stuck rule (0.7.4) | jumps only when the puppet itself stopped moving (> 3 m away, < 0.5 m own movement in 2 s); remote player faster than the puppet: `client/sprinttest.py` 1 jump in 20 s vs 5-7 with the 0.7.3 rule; blocked puppet still recovered (`blockedtest.py` 2/2). Known limit: the player runs 5.8 m/s, the puppet 5.3 m/s, and movement-speed effects (165, 451, 780) do not change it (`speedprobe.py`) |
 | Combat sync, story sync, level transitions | not started |
 
 ## Layout

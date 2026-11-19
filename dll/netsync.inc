@@ -82,7 +82,7 @@ static int g_netErr;
 static volatile int32_t g_lastSent[3];
 static uint32_t g_stuckSince, g_stuckJumps; static float g_bestD;
 /* 0.7.2 follow tuning. g_tune bits (je.netTune, for A/B tests): 1 = old cadence (one script per frame),
-   2 = old follow (walk until 4 m behind, no lead), 8 = 0.7.2 run rule (stays in run). */
+   2 = old follow (walk until 4 m behind, no lead), 8 = 0.7.2 run rule (stays in run) */
 static int g_tune;
 static float g_rvx, g_rvy;            /* remote player velocity, m/s, from received positions */
 static int g_ordRun; static uint32_t g_runOrders, g_walkOrders;
@@ -330,7 +330,11 @@ static void net_tick(void) {
        blocked by fences): jump next to the remote player instead of walking. */
     if (d2 > 3.0f * 3.0f) {
         float d = 0; { float lo = 0, hi = 20; for (int it = 0; it < 24; it++) { float m = (lo + hi) / 2; if (m * m < d2) lo = m; else hi = m; } d = lo; }
-        if (!g_stuckSince || d < g_bestD - 0.3f) { g_stuckSince = now; g_bestD = d; }
+        /* 0.7.4: a puppet that is moving is not stuck, even when the gap grows (a remote player
+           running faster than the puppet triggered ~1 jump per 3 s in a real session). */
+        static float ax, ay;
+        int moving = !old && fdist2(fx, fy, ax, ay) > 0.5f * 0.5f;
+        if (!g_stuckSince || d < g_bestD - 0.3f || moving) { g_stuckSince = now; g_bestD = d; ax = fx; ay = fy; }
         else if (now - g_stuckSince > 2000) {
             net_order(gx, gy, g_rz, 0, 1); g_ordX = gx; g_ordY = gy; g_haveOrder = 1; g_stuckJumps++; g_stuckSince = 0; return;
         }
