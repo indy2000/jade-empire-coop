@@ -46,6 +46,8 @@ typedef struct { void *BaseAddress, *AllocationBase; DWORD AllocationProtect; si
 __declspec(dllimport) size_t WINAPI VirtualQuery(const void*, MBI_*, size_t);
 /* Readable without touching the memory (IsBadReadPtr touches it and can trip guard pages: a peek
    crashed the game in 0.8.1-re). Committed, readable protection, no PAGE_GUARD/NOACCESS. */
+static volatile uint32_t g_forceAnimPtr, g_forceDirPtr, g_forceVelPtr, g_forceVelTick; static volatile float g_forceVx, g_forceVy;
+static volatile uint32_t g_forceAnimPtr2; static volatile int g_forceAnim; static volatile float g_forceC, g_forceS;
 static int mem_readable(uintptr_t a, uint32_t n) {
     while (n) {
         MBI_ m; if (!VirtualQuery((void *)a, &m, sizeof m)) return 0;
@@ -263,6 +265,44 @@ static void run_on_main(Req *r) {
         s_cat(r->out, ",\"id\":"); u2s(a1, id); s_cat(r->out, a1); s_cat(r->out, ",\"obj\":"); u2s(a1, obj); s_cat(r->out, a1);
         s_cat(r->out, ",\"vec\":"); u2s(a1, vec); s_cat(r->out, a1); s_cat(r->out, "}}"); return;
     }
+    if (s_eq(r->method, "je.objPtr")) {
+        /* RE: object id -> pointer (FUN_004610b0 on app+0xA0, as GetFacing does). oid = id */
+        void *srv = *(void **)((char *)app + 0xA0); uint32_t idc = r->oid, o = 0;
+        typedef char (__attribute__((thiscall)) *byid_t)(void *, uint32_t *, uint32_t *);
+        char ok = srv ? ((byid_t)0x004610b0)(srv, &idc, &o) : 0;
+        s_cpy(r->out, "{\"result\":{\"ptr\":"); u2s(a, ok == *(char *)0x006e8470 ? o : 0); s_cat(r->out, a); s_cat(r->out, "}}"); return;
+    }
+    if (s_eq(r->method, "je.findCreature")) {
+        /* RE: find creature objects by vtable (same as the player's) and position. oid = x mm + 2^31,
+           value = y mm + 2^31 (as uint32). Returns up to 4 pointers within 5 cm. Scans private RW memory. */
+        int *app2 = *G_APP; void *srv = app2 ? *(void **)((char *)app2 + 0xA0) : 0;
+        uintptr_t pc = srv ? (uintptr_t)((getpc_t)0x00424700)(srv) : 0; if (!pc) { s_cpy(r->out, "{\"error\":{\"code\":-32004,\"message\":\"no player\"}}"); return; }
+        int any = s_eq(r->resref, "any"); uint32_t vt = *(uint32_t *)pc; float x = ((int64_t)r->oid - 2147483648LL) / 1000.0f, y = ((int64_t)(uint32_t)r->ival - 2147483648LL) / 1000.0f;
+        s_cpy(r->out, "{\"result\":{\"vtable\":"); u2s(a, vt); s_cat(r->out, a); s_cat(r->out, ",\"found\":["); int nf = 0;
+        for (uintptr_t base = 0x10000; base < 0x7FFE0000 && nf < 8; ) {
+            MBI_ m; if (!VirtualQuery((void *)base, &m, sizeof m)) break;
+            uintptr_t end = (uintptr_t)m.BaseAddress + m.RegionSize;
+            if (m.State == 0x1000 && m.Protect == 0x04 && m.Type == 0x20000)
+                for (uintptr_t p = (uintptr_t)m.BaseAddress; p + 0x68 <= end && nf < 8; p += 4)
+                    if (*(uint32_t *)p == vt || (any && *(uint32_t *)p >= 0x006E1000 && *(uint32_t *)p < 0x00770000)) {
+                        float px = *(float *)(p + 0x5c), py = *(float *)(p + 0x60), dx = px - x, dy = py - y;
+                        float ox = *(float *)(p + 0x50), oy = *(float *)(p + 0x54), l = ox * ox + oy * oy;
+                        if (dx * dx + dy * dy < 0.0025f && l > 0.98f && l < 1.02f) { if (nf) s_cat(r->out, ","); u2s(a, (uint32_t)p); s_cat(r->out, a);
+                            s_cat(r->out, ","); u2s(a, *(uint32_t *)p); s_cat(r->out, a); nf++; } }
+            base = end;
+        }
+        s_cat(r->out, "]}}"); return;
+    }
+    if (s_eq(r->method, "je.testForce")) {
+        /* TEST HOOK: every frame write creature+0x52c (movement animation) = value (-1 off) and, when
+           resref is "dir", hold the orientation vector +0x50 at cos/sin taken from the previous call's
+           value packed as (cos*10000+20000)<<16 | (sin*10000+20000). oid = creature pointer. */
+        if (s_eq(r->resref, "vel")) { g_forceVelPtr = r->oid; g_forceVx = ((int)((uint32_t)r->ival >> 16) - 20000) / 100.0f; g_forceVy = ((int)((uint32_t)r->ival & 0xFFFF) - 20000) / 100.0f; g_forceVelTick = GetTickCount(); }
+        else if (s_eq(r->resref, "dir")) { g_forceDirPtr = r->oid; g_forceC = ((int)((uint32_t)r->ival >> 16) - 20000) / 10000.0f; g_forceS = ((int)((uint32_t)r->ival & 0xFFFF) - 20000) / 10000.0f; }
+        else { g_forceAnimPtr = r->oid; g_forceAnim = r->ival; if (r->ival < 0) g_forceAnimPtr = 0; }
+        if (s_eq(r->resref, "off")) { g_forceAnimPtr = 0; g_forceDirPtr = 0; g_forceVelPtr = 0; }
+        s_cpy(r->out, "{\"result\":{\"ok\":true}}"); return;
+    }
     if (s_eq(r->method, "je.testSetDir")) {
         /* TEST HOOK (test copies): turn the local player by writing its orientation vector (creature+0x50),
            oid = cos*10000 + 20000, value = sin*10000 + 20000. Scripts cannot turn the player (SetFacing). */
@@ -323,6 +363,9 @@ static void run_on_main(Req *r) {
         ((dtor_t)F_EXOSTR_DTOR)(&s);
         if (s_eq(r->method, "je.evalScript")) {
             int typ = 0, val = 0, got = rc == 1 ? ((ret_t)F_RETVAL)(vm, &typ, &val) : 0;
+            if (got && typ != 3 && r->hasIval && r->ival == 1) {   /* RE: value 1 = any type (objects: type 6, value = id) */
+                s_cpy(r->out, "{\"result\":{\"value\":"); u2s(a, (uint32_t)val); s_cat(r->out, a); s_cat(r->out, ",\"type\":"); i2s(a, typ); s_cat(r->out, a); s_cat(r->out, "}}"); return;
+            }
             if (!got || typ != 3) {
                 s_cpy(r->out, "{\"error\":{\"code\":-32011,\"message\":\"script did not return an int\",\"data\":{\"rc\":"); i2s(a, rc); s_cat(r->out, a);
                 s_cat(r->out, ",\"type\":"); i2s(a, typ); s_cat(r->out, a); s_cat(r->out, "}}}"); return;
@@ -352,6 +395,14 @@ static void pump(void) {
     }
 }
 
+static void force_tick(void) {
+    if (g_forceVelPtr && mem_readable(g_forceVelPtr + 0x5c, 8)) {   /* TEST: move the creature ourselves (cm/s) */
+        uint32_t t = GetTickCount(); float dt = (t - g_forceVelTick) / 1000.0f; g_forceVelTick = t;
+        *(float *)(uintptr_t)(g_forceVelPtr + 0x5c) += g_forceVx * dt; *(float *)(uintptr_t)(g_forceVelPtr + 0x60) += g_forceVy * dt;
+    }
+    if (g_forceAnimPtr && mem_readable(g_forceAnimPtr + 0x52c, 4)) *(int *)(uintptr_t)(g_forceAnimPtr + 0x52c) = g_forceAnim;
+    if (g_forceDirPtr && mem_readable(g_forceDirPtr + 0x50, 8)) { *(float *)(uintptr_t)(g_forceDirPtr + 0x50) = g_forceC; *(float *)(uintptr_t)(g_forceDirPtr + 0x54) = g_forceS; }
+}
 static BOOL WINAPI hkPeek(MSG_ *m, void *h, unsigned a, unsigned b, unsigned f) {
     if (!g_mainTid) g_mainTid = GetCurrentThreadId();
     if (GetCurrentThreadId() == g_mainTid) {
@@ -360,6 +411,7 @@ static BOOL WINAPI hkPeek(MSG_ *m, void *h, unsigned a, unsigned b, unsigned f) 
         if (g_keepActive) *G_APPACTIVE = 1;
         pump();
         net_tick();
+        force_tick();
     }
     return g_realPeek(m, h, a, b, f);
 }
@@ -426,11 +478,11 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.8.1\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.8.2-re4\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
-        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.evalMany\"]}}"); return;
+        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.objPtr\",\"je.testForce\",\"je.findCreature\",\"je.evalMany\"]}}"); return;
     }
     if (!g_hooked) { reply(s, idtok, "{\"error\":{\"code\":-32010,\"message\":\"frame hook not installed\"}}"); return; }
     Req r; memset(&r, 0, sizeof r);
