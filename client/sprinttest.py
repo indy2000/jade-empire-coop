@@ -4,7 +4,11 @@ Counts B's stuckJumps per run: new rule (tune 0) vs the 0.7.3 rule (tune 3, old 
 Pass: tune 0 has 0 stuck jumps, and the old rule shows some (the test can see the problem)."""
 import json, math, time
 import jeb, bot, ncs
-START = (-68.979, 31.075, 23.284); SPEED = 7.0
+import os
+def _start():  # 0.8.0: start where copy A's player stands (any area); JE_START=twin -> the Two Rivers point
+    if os.environ.get("JE_START") == "twin": return (-68.979, 31.075, 23.284)
+    jeb.use("test_install"); bot.setup(); return tuple(bot.pos())
+START = _start()
 def A(): jeb.use("test_install")
 def B(): jeb.use("test_install_b")
 A(); bot.setup()

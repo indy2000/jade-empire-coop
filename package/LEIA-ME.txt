@@ -1,4 +1,4 @@
-﻿JADE EMPIRE CO-OP 0.7.4 (versão de teste)
+﻿JADE EMPIRE CO-OP 0.8.0 (versão de teste)
 =========================================
 
 O que esta versão faz: dois jogadores, cada um no seu PC, veem o personagem do outro
@@ -25,8 +25,8 @@ atualiza os arquivos do co-op (não copia o jogo de novo, os saves ficam).
 
 JOGAR
 -----
-Os dois devem estar na MESMA ÁREA do jogo: nesta versão de teste, a escola de
-Two Rivers, no começo do jogo (um save no início ou um jogo novo).
+Os dois devem estar na MESMA ÁREA do jogo (por exemplo, os dois carregando um
+save no mesmo lugar). O boneco do outro jogador tem a aparência do personagem dele.
 
 Quem hospeda:
 1. Rode hospedar.bat. O jogo abre.
@@ -38,7 +38,7 @@ Quem entra:
 1. Rode entrar.bat e cole o código que recebeu. O jogo abre.
 2. Carregue o save. Com o personagem na tela, aperte Ctrl+Shift+N (toca um bipe).
 
-Em alguns segundos, cada um vê um personagem extra ao seu lado: é o boneco do outro
+Em alguns segundos, cada um vê o personagem do outro ao seu lado: é o boneco do outro
 jogador. Ele segue o outro jogador quando o outro anda.
 
 Observações:

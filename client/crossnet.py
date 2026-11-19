@@ -12,7 +12,11 @@ NET_SLOT = 192
 def slot_pos(slot):
     for i in range(3): bot.load("jx_s%d" % i, ncs.slot_pos_component(slot, i))
     return tuple(bot.ev("jx_s%d" % i) / 1000 for i in range(3))
-START = (-68.979, 31.075, 23.284)    # open ground at the save's start point (prologue)
+import os
+def _start():  # 0.8.0: start where copy A's player stands (any area); JE_START=twin -> the Two Rivers point
+    if os.environ.get("JE_START") == "twin": return (-68.979, 31.075, 23.284)
+    jeb.use("test_install"); bot.setup(); return tuple(bot.pos())
+START = _start()
 A(); bot.setup()
 bot.load("jb_act", ncs.jump_self(*START)); bot.run("jb_go"); time.sleep(0.5); a0 = bot.pos()
 B(); bot.setup(); b_player0 = bot.pos()

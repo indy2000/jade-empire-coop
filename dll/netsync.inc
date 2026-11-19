@@ -47,7 +47,8 @@ static void n_finish(Ncs *s) {
 enum { R_CLEARALLACTIONS = 9, R_EXECUTESCRIPT = 8, R_ACTIONMOVETOLOCATION = 21, R_GETAREA = 24, R_GETPOSITION = 27, R_GETISOBJECTVALID = 42,
        R_GETISDEAD = 140, R_LOCATION = 215, R_APPLYEFFECT = 220, R_FLOATTOINT = 231, R_CREATEOBJECT = 243,
        R_JUMPTOLOCATION = 313, R_GETPLAYER = 548, R_GETLOCALOBJECT = 54, R_SETLOCALOBJECT = 58,
-       R_EFFECTRESURRECTION = 82, R_SETOBJECTACTIVE = 756, R_SETCOMMANDABLE = 162 };
+       R_EFFECTRESURRECTION = 82, R_SETOBJECTACTIVE = 756, R_SETCOMMANDABLE = 162,
+       R_SETFACING = 10, R_GETFACING = 28, R_GETAPPEARANCE = 109, R_SETAPPEARANCE = 118, R_GETHEADTYPE = 119 };
 #define NET_SLOT 192   /* local object slot on the player that holds the puppet */
 static void n_push_puppet(Ncs *s) { n_consti(s, NET_SLOT); n_action(s, R_GETPLAYER, 0); n_action(s, R_GETLOCALOBJECT, 2); }
 static void n_void_main_begin(Ncs *s) { n_begin(s); n_jsr(s, 8); n_retn(s); }
@@ -86,6 +87,10 @@ static uint32_t g_stuckSince, g_stuckJumps; static float g_bestD;
 static int g_tune;
 static float g_rvx, g_rvy;            /* remote player velocity, m/s, from received positions */
 static int g_ordRun; static uint32_t g_runOrders, g_walkOrders;
+/* 0.8.0: look. Packet JEC2 also carries facing (centidegrees), appearance and head type. */
+static int32_t g_myFace, g_myApp = -1, g_myHead = -1;
+static volatile int32_t g_rface; static volatile int g_rfaceValid, g_rapp = -1, g_rhead = -1;
+static int g_appliedApp = -999, g_appliedHead = -999; static int32_t g_faceSet = -1; static uint32_t g_faceSetTick, g_faceSets, g_appSets;
 static int g_netPaused;
 static int g_netArmed;  /* nothing runs until je.netStart (scripts during early start-up crashed v0.6) */
 static int g_crumbs;    /* first-run breadcrumbs written to jebridge.log */
@@ -144,9 +149,14 @@ static void net_build_static_scripts(void) {
         char nq[8] = "jbn_q0"; nq[5] = '0' + i; ms_store(nq, s.b, s.n);   /* puppet position */
     }
     n_int_main_begin(&s); n_action(&s, R_GETPLAYER, 0); n_action(&s, R_GETISOBJECTVALID, 1); n_int_main_end(&s, 4); ms_store("jbn_pcok", s.b, s.n);
+    /* jbn_pf: FloatToInt(GetFacing(player) * 100); jbn_pa / jbn_ph: GetAppearance / GetHeadType(player) */
+    n_int_main_begin(&s); n_action(&s, R_GETPLAYER, 0); n_action(&s, R_GETFACING, 1); n_constf(&s, 100.0f); n_mulff(&s); n_action(&s, R_FLOATTOINT, 1); n_int_main_end(&s, 4); ms_store("jbn_pf", s.b, s.n);
+    n_int_main_begin(&s); n_action(&s, R_GETPLAYER, 0); n_action(&s, R_GETAPPEARANCE, 1); n_int_main_end(&s, 4); ms_store("jbn_pa", s.b, s.n);
+    n_int_main_begin(&s); n_action(&s, R_GETPLAYER, 0); n_action(&s, R_GETHEADTYPE, 1); n_int_main_end(&s, 4); ms_store("jbn_ph", s.b, s.n);
     n_int_main_begin(&s); n_push_puppet(&s); n_action(&s, R_GETISDEAD, 1); n_int_main_end(&s, 4); ms_store("jbn_qdead", s.b, s.n);
-    /* resurrect puppet: ApplyEffectToObject(puppet, INSTANT, EffectResurrection(0), 0.0) */
-    n_void_main_begin(&s); n_constf(&s, 0.0f); n_consti(&s, 0); n_action(&s, R_EFFECTRESURRECTION, 1); n_consti(&s, 0);
+    /* resurrect puppet: ApplyEffectToObject(puppet, INSTANT, EffectResurrection(TRUE), 0.0).
+       0.8.0: FALSE revived it in Two Rivers only; in a later area only TRUE works (GetIsDead stayed 1). */
+    n_void_main_begin(&s); n_constf(&s, 0.0f); n_consti(&s, 1); n_action(&s, R_EFFECTRESURRECTION, 1); n_consti(&s, 0);
     n_push_puppet(&s); n_action(&s, R_APPLYEFFECT, 4); n_retn(&s); n_finish(&s); ms_store("jbn_res", s.b, s.n);
     /* run jbn_act as the puppet */
     n_void_main_begin(&s); n_consts(&s, "jbn_act"); n_push_puppet(&s); n_action(&s, R_EXECUTESCRIPT, 2); n_retn(&s); n_finish(&s); ms_store("jbn_go", s.b, s.n);
@@ -166,6 +176,7 @@ static int net_spawn_puppet(float x, float y, float z) {
     return dead == 0;
 }
 static void net_order(float x, float y, float z, int run, int jump) {
+    g_faceSet = -1;
     Ncs s; n_void_main_begin(&s);
     /* 0.7.2: ActionMoveToLocation is queued behind earlier orders; without clearing, the puppet walked
        every stale waypoint in turn (stop, start) and trailed by seconds. tune bit 4 = keep old queueing. */
@@ -184,6 +195,24 @@ static void net_order(float x, float y, float z, int run, int jump) {
     vm_run("jbn_go", 0x7F000000);
     if (jump) g_jumps++; else g_moves++;
 }
+
+/* 0.8.0: give the puppet the remote player's look: SetAppearance(puppet, app, head). A player head of
+   -1 ("built-in") must be passed as 0: -1 keeps the template's head (the owner saw the abbot's head). */
+static void net_apply_appearance(void) {
+    int head = g_rhead < 0 ? 0 : g_rhead;
+    Ncs s; n_void_main_begin(&s); n_consti(&s, head); n_consti(&s, g_rapp); n_push_puppet(&s); n_action(&s, R_SETAPPEARANCE, 3);
+    n_retn(&s); n_finish(&s);
+    if (ms_store("jbn_app", s.b, s.n)) return;
+    if (vm_run("jbn_app", 0x7F000000) == 1) { g_appliedApp = g_rapp; g_appliedHead = g_rhead; g_appSets++; }
+}
+/* SetFacing(fDirection, nAnimate = 0, oTarget = puppet, nDirection = FACING_TURNSHORTEST) */
+static void net_set_facing(int32_t centideg) {
+    Ncs s; n_void_main_begin(&s); n_consti(&s, 0); n_push_puppet(&s); n_consti(&s, 0); n_constf(&s, centideg / 100.0f); n_action(&s, R_SETFACING, 4);
+    n_retn(&s); n_finish(&s);
+    if (ms_store("jbn_face", s.b, s.n)) return;
+    if (vm_run("jbn_face", 0x7F000000) == 1) { g_faceSet = centideg; g_faceSets++; }
+}
+static int32_t angdiff_cd(int32_t a, int32_t b) { int32_t d = (a - b) % 36000; if (d < 0) d += 36000; if (d > 18000) d = 36000 - d; return d; }
 
 static int net_parse_config(void) {
     char p[300], buf[512]; s_cpy(p, g_dir); s_cat(p, "bridge\\net.txt");
@@ -248,7 +277,9 @@ static void net_tick(void) {
         if (g_useSteam) r = steam_recv(pkt, sizeof pkt);
         else { SOCKADDR_IN4 from; int fl = sizeof from; r = recvfrom(g_udp, pkt, sizeof pkt, 0, &from, &fl); }
         if (r <= 0) break;
-        if (r != 24 || pkt[0] != 'J' || pkt[1] != 'E' || pkt[2] != 'C' || pkt[3] != '1') { g_bad++; continue; }
+        if (r < 24 || pkt[0] != 'J' || pkt[1] != 'E' || pkt[2] != 'C' || !((pkt[3] == '1' && r == 24) || (pkt[3] == '2' && r == 32))) { g_bad++; continue; }
+        if (pkt[3] == '2') { int32_t f; int16_t a, h; memcpy(&f, pkt + 24, 4); memcpy(&a, pkt + 28, 2); memcpy(&h, pkt + 30, 2);
+                             g_rface = f; g_rfaceValid = f >= 0; g_rapp = a; g_rhead = h; }
         { int32_t v; memcpy(&v, pkt + 8, 4); g_rxm = v; memcpy(&v, pkt + 12, 4); g_rym = v; memcpy(&v, pkt + 16, 4); g_rzm = v; }
         uint32_t flags; memcpy(&flags, pkt + 20, 4); g_rvalid = flags & 1; g_haveRemote = 1; g_recv++; g_lastRecvTick = now;
         { /* 0.7.3: speed over the last ~0.5 s from a ring of received positions. Short windows
@@ -277,21 +308,24 @@ static void net_tick(void) {
             if (!vm_eval(names[g_step], (int *)&g_pv[g_step]) || (g_step == 0 && !g_pv[0])) { g_step = 0; return; }
             if (++g_step <= 3 && split) return;
         }
-        /* step 3 done: send */
+        /* step 3 done: facing (and now and then appearance/head), then send */
+        { int f = -1; if (vm_eval("jbn_pf", &f)) g_myFace = f; else g_myFace = -1; }
+        if (g_myApp < 0 || (g_seq % 40) == 0) { int a = -1, h = -1; if (vm_eval("jbn_pa", &a)) g_myApp = a; if (vm_eval("jbn_ph", &h)) g_myHead = h; }
         CRUMB(8, "net: first player position read");
-        char pkt[24]; uint32_t fl = 1; int32_t v;
+        char pkt[32]; uint32_t fl = 1; int32_t v;
         pkt[0] = 'J'; pkt[1] = 'E'; pkt[2] = 'C'; pkt[3] = '1'; g_seq++; memcpy(pkt + 4, (const void *)&g_seq, 4);
         v = g_pv[1]; memcpy(pkt + 8, &v, 4); v = g_pv[2]; memcpy(pkt + 12, &v, 4); v = g_pv[3]; memcpy(pkt + 16, &v, 4); memcpy(pkt + 20, &fl, 4);
+        pkt[3] = '2'; memcpy(pkt + 24, &g_myFace, 4); { int16_t a = (int16_t)g_myApp, h = (int16_t)g_myHead; memcpy(pkt + 28, &a, 2); memcpy(pkt + 30, &h, 2); }
         g_lastSent[0] = g_pv[1]; g_lastSent[1] = g_pv[2]; g_lastSent[2] = g_pv[3];
         g_stage = "sendto";
-        if (g_useSteam) { uint32_t before = g_sSent, eb = g_sSendErr; steam_send(pkt, 24); if (g_sSent != before) g_sent++; else if (g_sSendErr != eb) g_netErr++; }
-        else if (sendto(g_udp, pkt, 24, 0, &g_peer, sizeof g_peer) == 24) g_sent++; else g_netErr++;
+        if (g_useSteam) { uint32_t before = g_sSent, eb = g_sSendErr; steam_send(pkt, 32); if (g_sSent != before) g_sent++; else if (g_sSendErr != eb) g_netErr++; }
+        else if (sendto(g_udp, pkt, 32, 0, &g_peer, sizeof g_peer) == 32) g_sent++; else g_netErr++;
         g_stage = "net idle";
         CRUMB(16, "net: first packet sent");
         if (!g_haveRemote || !g_rvalid || now - g_lastRecvTick > 3000) { g_step = 0; return; }
         if (g_puppetState == 0) {
             CRUMB(32, "net: first puppet spawn attempt");
-            if (net_spawn_puppet(g_rx + 1.0f, g_ry, g_rz)) { g_puppetState = 1; g_spawns++; g_haveOrder = 0; }
+            if (net_spawn_puppet(g_rx + 1.0f, g_ry, g_rz)) { g_puppetState = 1; g_spawns++; g_haveOrder = 0; g_appliedApp = g_appliedHead = -999; g_faceSet = -1; }
             g_step = 0; return;
         }
         return;                                   /* puppet position from the next frame on */
@@ -305,6 +339,8 @@ static void net_tick(void) {
     g_step = 0;
     CRUMB(64, "net: first puppet drive");
     float fx = g_pv[4] / 1000.0f, fy = g_pv[5] / 1000.0f;
+    /* tune 32: no look (appearance/facing) for A/B tests */
+    if (!(g_tune & 32) && g_rapp > 0 && (g_rapp != g_appliedApp || g_rhead != g_appliedHead)) { net_apply_appearance(); return; }
     int old = g_tune & 2;
     float sp2 = g_rvx * g_rvx + g_rvy * g_rvy;
     /* Lead: aim where the remote player will be in ~0.3 s (network + order delay), at most 2 m ahead. */
@@ -325,7 +361,16 @@ static void net_tick(void) {
     else if (g_ordRun) run = sp2 > 2.0f * 2.0f || d2 > 3.0f * 3.0f;
     else               run = sp2 > 2.6f * 2.6f || d2 > 4.0f * 4.0f;
     if (d2 > 15.0f * 15.0f) { net_order(gx, gy, g_rz, 0, 1); g_ordX = gx; g_ordY = gy; g_haveOrder = 1; return; }
-    if (d2 <= 1.6f * 1.6f && (old || sp2 < 1.0f)) { g_stuckSince = 0; return; }
+    if (d2 <= 1.6f * 1.6f && (old || sp2 < 1.0f)) {
+        g_stuckSince = 0;
+        /* standing: face where the remote player faces (at most every 250 ms, when it differs by > 10 deg) */
+        /* OFF by default (tune 64 turns it on): GetFacing(GetPlayer()) is stale for the player (always
+           119.4 deg in a session while the owner walked in all directions), so the puppet snapped to a
+           wrong facing. Needs the real orientation source first. */
+        if ((g_tune & 64) && !(g_tune & 32) && g_rfaceValid && sp2 < 0.3f * 0.3f && now - g_faceSetTick > 250 &&
+            (g_faceSet < 0 || angdiff_cd(g_rface, g_faceSet) > 1000)) { g_faceSetTick = now; net_set_facing(g_rface); }
+        return;
+    }
     /* Stuck: more than 3 m away and the distance has not shrunk by 0.3 m for 2 s (e.g. pathing
        blocked by fences): jump next to the remote player instead of walking. */
     if (d2 > 3.0f * 3.0f) {
@@ -365,6 +410,11 @@ static void net_status(char *out) {
     s_cat(out, ",\"lastSentMm\":["); i2s(a, g_lastSent[0]); s_cat(out, a); s_cat(out, ","); i2s(a, g_lastSent[1]); s_cat(out, a); s_cat(out, ","); i2s(a, g_lastSent[2]); s_cat(out, a); s_cat(out, "]");
     s_cat(out, ",\"tune\":"); u2s(a, (uint32_t)g_tune); s_cat(out, a);
     s_cat(out, ",\"remoteSpeedMms\":"); u2s(a, (uint32_t)(1000.0f / fisqrt(g_rvx * g_rvx + g_rvy * g_rvy + 1e-6f))); s_cat(out, a);
+    s_cat(out, ",\"remoteFace\":"); i2s(a, g_rfaceValid ? g_rface : -1); s_cat(out, a);
+    s_cat(out, ",\"remoteApp\":"); i2s(a, g_rapp); s_cat(out, a);
+    s_cat(out, ",\"remoteHead\":"); i2s(a, g_rhead); s_cat(out, a);
+    s_cat(out, ",\"appSets\":"); u2s(a, g_appSets); s_cat(out, a);
+    s_cat(out, ",\"faceSets\":"); u2s(a, g_faceSets); s_cat(out, a);
     s_cat(out, ",\"noPlayerSkips\":"); u2s(a, g_noPlayerSkips); s_cat(out, a);
     s_cat(out, ",\"runOrders\":"); u2s(a, g_runOrders); s_cat(out, a);
     s_cat(out, ",\"walkOrders\":"); u2s(a, g_walkOrders); s_cat(out, a);

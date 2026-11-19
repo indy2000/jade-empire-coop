@@ -111,8 +111,8 @@ typedef int  (__attribute__((thiscall)) *load_t)(void *, CExoString *);
 typedef void (__attribute__((thiscall)) *copy_t)(void *, void *, const void *, uint32_t);
 
 /* ---------------- in-memory scripts ---------------- */
-#define MS_MAX 32
-#define MS_POOL 65536
+#define MS_MAX 128   /* 0.8.0: was 32; long test sessions filled it ("script table full") */
+#define MS_POOL 262144
 typedef struct { char name[17]; uint32_t off, len, cap; } MemScript;
 static MemScript g_ms[MS_MAX]; static int g_msn; static uint8_t g_pool[MS_POOL]; static uint32_t g_poolUsed;
 static volatile uint32_t g_memLoads;
@@ -376,7 +376,7 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.7.4\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.8.0\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {

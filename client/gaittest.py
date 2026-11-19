@@ -7,7 +7,11 @@ Usage: python3 gaittest.py [--mutate]   (mutation: je.netTune 8 = the 0.7.2 rule
 import json, math, sys, time
 import jeb, bot, ncs
 MUT = "--mutate" in sys.argv
-START = (-68.979, 31.075, 23.284)
+import os
+def _start():  # 0.8.0: start where copy A's player stands (any area); JE_START=twin -> the Two Rivers point
+    if os.environ.get("JE_START") == "twin": return (-68.979, 31.075, 23.284)
+    jeb.use("test_install"); bot.setup(); return tuple(bot.pos())
+START = _start()
 def A(): jeb.use("test_install")
 def B(): jeb.use("test_install_b")
 def status(): B(); return jeb.call("je.netStatus")["result"]
