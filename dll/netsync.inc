@@ -82,10 +82,10 @@ static int g_netErr;
 static volatile int32_t g_lastSent[3];
 static uint32_t g_stuckSince, g_stuckJumps; static float g_bestD;
 /* 0.7.2 follow tuning. g_tune bits (je.netTune, for A/B tests): 1 = old cadence (one script per frame),
-   2 = old follow (walk until 4 m behind, no lead). */
+   2 = old follow (walk until 4 m behind, no lead), 8 = 0.7.2 run rule (stays in run). */
 static int g_tune;
 static float g_rvx, g_rvy;            /* remote player velocity, m/s, from received positions */
-static int g_ordRun;
+static int g_ordRun; static uint32_t g_runOrders, g_walkOrders;
 static int g_netPaused;
 static int g_netArmed;  /* nothing runs until je.netStart (scripts during early start-up crashed v0.6) */
 static int g_crumbs;    /* first-run breadcrumbs written to jebridge.log */
@@ -112,6 +112,17 @@ static int vm_run(const char *name, uint32_t oid) {
     if (*(int *)((char *)vm + 0xC) != -1) { g_vmBusySkips++; return -2; }
     CExoString s; s.p = 0; s.n = 0; ((ctor_t)F_EXOSTR_CTOR)(&s, name);
     int rc = ((run_t)F_RUNSCRIPT)(vm, &s, oid, 1); ((dtor_t)F_EXOSTR_DTOR)(&s); return rc;
+}
+/* Is there a player creature? NWScript GetPlayer (0x00487310) does app+0xA0 -> FUN_00424700 (thiscall,
+   a lookup) and reads [result+8] WITHOUT a null check: after Esc > Quit game the player is gone and
+   every net script crashed the game there (AV at 0x00487327, "Quit game" closed the game instead of
+   going to the main menu). Same lookup here, with the check. */
+typedef void *(__attribute__((thiscall)) *getpc_t)(void *);
+static uint32_t g_noPlayerSkips;
+static int player_exists(void) {
+    int *app = *G_APP; if (!app) return 0;
+    void *srv = *(void **)((char *)app + 0xA0); if (!srv) return 0;
+    return ((getpc_t)0x00424700)(srv) != 0;
 }
 static __attribute__((noinline)) int vm_eval(const char *name, int *out) {
     int *app = *G_APP; if (!app) return 0;
@@ -240,15 +251,22 @@ static void net_tick(void) {
         if (r != 24 || pkt[0] != 'J' || pkt[1] != 'E' || pkt[2] != 'C' || pkt[3] != '1') { g_bad++; continue; }
         { int32_t v; memcpy(&v, pkt + 8, 4); g_rxm = v; memcpy(&v, pkt + 12, 4); g_rym = v; memcpy(&v, pkt + 16, 4); g_rzm = v; }
         uint32_t flags; memcpy(&flags, pkt + 20, 4); g_rvalid = flags & 1; g_haveRemote = 1; g_recv++; g_lastRecvTick = now;
-        { static int32_t vx0, vy0; static uint32_t vt0;            /* velocity over >= 200 ms windows */
-          if (!vt0 || now - vt0 > 1500) { vx0 = g_rxm; vy0 = g_rym; vt0 = now; g_rvx = g_rvy = 0; }
-          else if (now - vt0 >= 150) { float dt = (now - vt0) / 1000.0f;   /* smoothed: packets arrive bunched */
-                                       g_rvx = 0.5f * g_rvx + 0.5f * ((g_rxm - vx0) / 1000.0f / dt); g_rvy = 0.5f * g_rvy + 0.5f * ((g_rym - vy0) / 1000.0f / dt);
-                                       vx0 = g_rxm; vy0 = g_rym; vt0 = now; } }
+        { /* 0.7.3: speed over the last ~0.5 s from a ring of received positions. Short windows
+             (150 ms) flickered with bunched packets and the puppet kept switching walk/run. */
+          static int32_t hx[16], hy[16]; static uint32_t ht[16]; static int hn, hi;
+          hx[hi] = g_rxm; hy[hi] = g_rym; ht[hi] = now; int cur = hi; hi = (hi + 1) & 15; if (hn < 16) hn++;
+          int best = -1;
+          for (int k = 1; k < hn; k++) { int j = (cur - k) & 15; uint32_t age = now - ht[j]; if (age > 900) break; best = j; if (age >= 500) break; }
+          if (best >= 0 && now - ht[best] >= 250) { float dt = (now - ht[best]) / 1000.0f;
+              g_rvx = (g_rxm - hx[best]) / 1000.0f / dt; g_rvy = (g_rym - hy[best]) / 1000.0f / dt; }
+          else if (best < 0) g_rvx = g_rvy = 0; }
         CRUMB(128, "net: first packet received");
     }
     g_stage = "net idle";
     if (g_netPaused) return;
+    g_stage = "player check";
+    if (!player_exists()) { g_noPlayerSkips++; g_step = 0; g_puppetState = 0; g_haveOrder = 0; g_stage = "net idle"; return; }
+    g_stage = "net idle";
     if (now - g_lastRecvTick > 600) g_rvx = g_rvy = 0;        /* no fresh data: do not extrapolate */
     if (g_step == 0) { if (now - g_lastSendTick < 50) return; g_lastSendTick = now; }
     int split = g_tune & 1;   /* 0.7.2: player x,y,z in one frame, puppet x,y,z in the next (was 7 frames) */
@@ -296,9 +314,16 @@ static void net_tick(void) {
     float gx = tx - 1.0f, gy = ty;                         /* stand 1 m beside the remote player */
     float d2 = fdist2(fx, fy, tx, ty);
     /* Run when the remote player runs (> 2.5 m/s) or when more than 2.5 m behind (was: only > 4 m). */
-    /* With hysteresis: a flickering speed estimate made the puppet restart its order again and again. */
-    int run = old ? d2 > 16.0f
-                  : (g_ordRun ? !(sp2 < 1.0f && d2 < 1.8f * 1.8f) : (sp2 > 2.0f * 2.0f || d2 > 2.5f * 2.5f));
+    /* 0.7.3: copy the remote player's gait. Measured: walk 1.5 m/s, jog 3.1, run 5.3. Walk below
+       ~2.3 m/s, run above; run anyway to catch up when > 4 m behind. Hysteresis (2.0 / 2.6 m/s, 3 / 4 m)
+       because a flickering estimate made the puppet restart its order (0.7.2 stayed in run while the
+       remote player walked: it only went back to walking below 1 m/s). */
+    int run;
+    if (old) run = d2 > 16.0f;
+    else if (g_tune & 8)  /* 0.7.2 rule, kept for the gait test's mutation run */
+        run = g_ordRun ? !(sp2 < 1.0f && d2 < 1.8f * 1.8f) : (sp2 > 2.0f * 2.0f || d2 > 2.5f * 2.5f);
+    else if (g_ordRun) run = sp2 > 2.0f * 2.0f || d2 > 3.0f * 3.0f;
+    else               run = sp2 > 2.6f * 2.6f || d2 > 4.0f * 4.0f;
     if (d2 > 15.0f * 15.0f) { net_order(gx, gy, g_rz, 0, 1); g_ordX = gx; g_ordY = gy; g_haveOrder = 1; return; }
     if (d2 <= 1.6f * 1.6f && (old || sp2 < 1.0f)) { g_stuckSince = 0; return; }
     /* Stuck: more than 3 m away and the distance has not shrunk by 0.3 m for 2 s (e.g. pathing
@@ -313,10 +338,11 @@ static void net_tick(void) {
     /* New orders: old mode on every 0.5 m target change; new mode when the target moved 1.5 m, the run
        flag changed, or the puppet already reached the last order point (fewer restarts). */
     int reorder = old ? fdist2(gx, gy, g_ordX, g_ordY) > 0.5f * 0.5f
-                      : (fdist2(gx, gy, g_ordX, g_ordY) > 1.5f * 1.5f || (run && !g_ordRun) ||
+                      : (fdist2(gx, gy, g_ordX, g_ordY) > 1.5f * 1.5f || run != g_ordRun ||
                          (fdist2(fx, fy, g_ordX, g_ordY) < 1.0f && fdist2(gx, gy, g_ordX, g_ordY) > 0.3f * 0.3f));
     if (!g_haveOrder || reorder) {
         net_order(gx, gy, g_rz, run, 0); g_ordX = gx; g_ordY = gy; g_haveOrder = 1; g_ordRun = run;
+        if (run) g_runOrders++; else g_walkOrders++;
     }
 }
 
@@ -335,6 +361,9 @@ static void net_status(char *out) {
     s_cat(out, ",\"lastSentMm\":["); i2s(a, g_lastSent[0]); s_cat(out, a); s_cat(out, ","); i2s(a, g_lastSent[1]); s_cat(out, a); s_cat(out, ","); i2s(a, g_lastSent[2]); s_cat(out, a); s_cat(out, "]");
     s_cat(out, ",\"tune\":"); u2s(a, (uint32_t)g_tune); s_cat(out, a);
     s_cat(out, ",\"remoteSpeedMms\":"); u2s(a, (uint32_t)(1000.0f / fisqrt(g_rvx * g_rvx + g_rvy * g_rvy + 1e-6f))); s_cat(out, a);
+    s_cat(out, ",\"noPlayerSkips\":"); u2s(a, g_noPlayerSkips); s_cat(out, a);
+    s_cat(out, ",\"runOrders\":"); u2s(a, g_runOrders); s_cat(out, a);
+    s_cat(out, ",\"walkOrders\":"); u2s(a, g_walkOrders); s_cat(out, a);
     s_cat(out, ",\"stuckJumps\":"); u2s(a, g_stuckJumps); s_cat(out, a);
     s_cat(out, ",\"vmBusySkips\":"); u2s(a, g_vmBusySkips); s_cat(out, a);
     s_cat(out, ",\"remoteMm\":["); i2s(a, g_rxm); s_cat(out, a); s_cat(out, ",");
