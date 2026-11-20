@@ -22,8 +22,9 @@ __declspec(dllimport) int __stdcall recvfrom(SOCKET, char*, int, int, void*, int
 __declspec(dllimport) int __stdcall ioctlsocket(SOCKET, long, unsigned long*);
 
 /* ---- tiny NCS builder (same encodings as client/ncs.py) ---- */
-typedef struct { uint8_t b[512]; uint32_t n; } Ncs;
-static void nb(Ncs *s, uint8_t v) { if (s->n < sizeof s->b) s->b[s->n++] = v; }
+/* 0.9.1: 512 -> 4096 bytes; an overflowing script is refused (n = 0), it was cut off silently before */
+typedef struct { uint8_t b[4096]; uint32_t n; int over; } Ncs;
+static void nb(Ncs *s, uint8_t v) { if (s->n < sizeof s->b) s->b[s->n++] = v; else s->over = 1; }
 static void nbe32(Ncs *s, uint32_t v) { nb(s, v >> 24); nb(s, v >> 16); nb(s, v >> 8); nb(s, v); }
 static void nbe16(Ncs *s, uint16_t v) { nb(s, v >> 8); nb(s, v); }
 static void n_consti(Ncs *s, int32_t v) { nb(s, 0x04); nb(s, 0x03); nbe32(s, (uint32_t)v); }
@@ -38,8 +39,9 @@ static void n_retn(Ncs *s) { nb(s, 0x20); nb(s, 0x00); }
 static void n_jsr(Ncs *s, int32_t o) { nb(s, 0x1E); nb(s, 0x00); nbe32(s, (uint32_t)o); }
 static void n_rsaddi(Ncs *s) { nb(s, 0x02); nb(s, 0x03); }
 /* header written at the end: "NCS V1.0" 'B' size(BE) */
-static void n_begin(Ncs *s) { s->n = 0; for (int i = 0; i < 13; i++) nb(s, 0); }
+static void n_begin(Ncs *s) { s->n = 0; s->over = 0; for (int i = 0; i < 13; i++) nb(s, 0); }
 static void n_finish(Ncs *s) {
+    if (s->over) { logline("net: NCS script too long, refused"); s->n = 0; return; }
     const char *h = "NCS V1.0B"; for (int i = 0; i < 9; i++) s->b[i] = (uint8_t)h[i];
     s->b[9] = s->n >> 24; s->b[10] = s->n >> 16; s->b[11] = s->n >> 8; s->b[12] = s->n;
 }
@@ -88,6 +90,7 @@ static int g_tune;
 static float g_rvx, g_rvy;            /* remote player velocity, m/s, from received positions */
 static int g_ordRun; static uint32_t g_runOrders, g_walkOrders;
 /* 0.8.0: look. Packet JEC2 also carries facing (centidegrees), appearance and head type. */
+static int32_t g_myArea, g_rarea; static uint32_t g_areaHides, g_areaReads;
 static int16_t g_myFc, g_myFs; static int32_t g_myApp = -1, g_myHead = -1;
 static volatile int16_t g_rfc, g_rfs; static volatile int g_rfaceValid, g_rapp = -1, g_rhead = -1;
 static int g_appliedApp = -999, g_appliedHead = -999; static int32_t g_faceSet = -1; static int16_t g_setFc, g_setFs; static uint32_t g_faceSetTick, g_faceSets, g_appSets;
@@ -100,6 +103,7 @@ static int g_crumbs;    /* first-run breadcrumbs written to jebridge.log */
 /* Store a script; a name keeps its own region, rewritten in place when the new code fits
    (the VM copies code into its own slot at load time, so rewriting is safe). */
 static int ms_store(const char *name, const uint8_t *data, uint32_t n) {
+    if (n < 13) return -3;                     /* refused script (n_finish), nothing to store */
     MemScript *m = ms_find(name);
     if (m && n <= m->cap) { memcpy(g_pool + m->off, data, n); m->len = n; return 0; }
     uint32_t cap = n < 512 ? 512 : n;
@@ -161,6 +165,20 @@ static void net_build_static_scripts(void) {
         char nq[8] = "jbn_q0"; nq[5] = '0' + i; ms_store(nq, s.b, s.n);   /* puppet position */
     }
     n_int_main_begin(&s); n_action(&s, R_GETPLAYER, 0); n_action(&s, R_GETISOBJECTVALID, 1); n_int_main_end(&s, 4); ms_store("jbn_pcok", s.b, s.n);
+    /* jbn_area (0.9.1): hash of the area's tag, h = h*31 + FindSubString(ALPHA, tag[i]) + 2 over 16
+       lower-case chars (same tag -> same number in both games; scripts cannot return strings). */
+    {
+        static const char *ALPHA = "abcdefghijklmnopqrstuvwxyz0123456789_";
+        n_int_main_begin(&s); n_consti(&s, 0);
+        n_action(&s, R_GETPLAYER, 0); n_action(&s, 24 /* GetArea */, 1); n_action(&s, 168 /* GetTag */, 1); n_action(&s, 61 /* GetStringLowerCase */, 1);
+        for (int i = 0; i < 16; i++) {
+            n_consti(&s, 1); n_consti(&s, i); n_cptopsp(&s, -12, 4); n_action(&s, 65 /* GetSubString */, 3);
+            n_consts(&s, ALPHA); n_action(&s, 66 /* FindSubString */, 2); n_consti(&s, 2); nb(&s, 0x14); nb(&s, 0x20);   /* ADDII */
+            n_cptopsp(&s, -12, 4); n_consti(&s, 31); nb(&s, 0x16); nb(&s, 0x20); nb(&s, 0x14); nb(&s, 0x20);              /* MULII, ADDII */
+            n_cpdownsp(&s, -12, 4); n_movsp(&s, -4);
+        }
+        n_cptopsp(&s, -8, 4); n_int_main_end(&s, 12); ms_store("jbn_area", s.b, s.n);
+    }
     /* jbn_pa / jbn_ph: GetAppearance / GetHeadType(player) */
     n_int_main_begin(&s); n_action(&s, R_GETPLAYER, 0); n_action(&s, R_GETAPPEARANCE, 1); n_int_main_end(&s, 4); ms_store("jbn_pa", s.b, s.n);
     n_int_main_begin(&s); n_action(&s, R_GETPLAYER, 0); n_action(&s, R_GETHEADTYPE, 1); n_int_main_end(&s, 4); ms_store("jbn_ph", s.b, s.n);
@@ -294,8 +312,9 @@ static void net_tick(void) {
         if (g_useSteam) r = steam_recv(pkt, sizeof pkt);
         else { SOCKADDR_IN4 from; int fl = sizeof from; r = recvfrom(g_udp, pkt, sizeof pkt, 0, &from, &fl); }
         if (r <= 0) break;
-        if (r < 24 || pkt[0] != 'J' || pkt[1] != 'E' || pkt[2] != 'C' || !((pkt[3] == '1' && r == 24) || (pkt[3] == '2' && r == 32))) { g_bad++; continue; }
-        if (pkt[3] == '2') { int16_t fc, fs, a, h; memcpy(&fc, pkt + 24, 2); memcpy(&fs, pkt + 26, 2); memcpy(&a, pkt + 28, 2); memcpy(&h, pkt + 30, 2);
+        if (r < 24 || pkt[0] != 'J' || pkt[1] != 'E' || pkt[2] != 'C' || !((pkt[3] == '1' && r == 24) || (pkt[3] == '2' && r == 32) || (pkt[3] == '3' && r == 36))) { g_bad++; continue; }
+        if (pkt[3] == '3') { int32_t ar; memcpy(&ar, pkt + 32, 4); g_rarea = ar; } else g_rarea = 0;
+        if (pkt[3] >= '2') { int16_t fc, fs, a, h; memcpy(&fc, pkt + 24, 2); memcpy(&fs, pkt + 26, 2); memcpy(&a, pkt + 28, 2); memcpy(&h, pkt + 30, 2);
                              g_rfc = fc; g_rfs = fs; g_rfaceValid = fc || fs; g_rapp = a; g_rhead = h; }
         { int32_t v; memcpy(&v, pkt + 8, 4); g_rxm = v; memcpy(&v, pkt + 12, 4); g_rym = v; memcpy(&v, pkt + 16, 4); g_rzm = v; }
         uint32_t flags; memcpy(&flags, pkt + 20, 4); g_rvalid = flags & 1; g_haveRemote = 1; g_recv++; g_lastRecvTick = now;
@@ -314,7 +333,7 @@ static void net_tick(void) {
     g_stage = "net idle";
     if (g_netPaused) return;
     g_stage = "player check";
-    if (!player_exists()) { g_noPlayerSkips++; g_step = 0; g_puppetState = 0; g_haveOrder = 0; g_stage = "net idle"; return; }
+    if (!player_exists()) { g_noPlayerSkips++; g_step = 0; g_puppetState = 0; g_haveOrder = 0; g_myArea = 0; g_stage = "net idle"; return; }
     g_stage = "net idle";
     if (now - g_lastRecvTick > 600) g_rvx = g_rvy = 0;        /* no fresh data: do not extrapolate */
     if (g_step == 0) { if (now - g_lastSendTick < 50) return; g_lastSendTick = now; }
@@ -328,19 +347,26 @@ static void net_tick(void) {
         }
         /* step 3 done: facing (and now and then appearance/head), then send */
         player_dir(&g_myFc, &g_myFs);
+        { if (!g_myArea || (g_seq % 20) == 0) { int h = 0; if (vm_eval("jbn_area", &h)) { g_myArea = h; g_areaReads++; } } }
         if (g_myApp < 0 || (g_seq % 40) == 0) { int a = -1, h = -1; if (vm_eval("jbn_pa", &a)) g_myApp = a; if (vm_eval("jbn_ph", &h)) g_myHead = h; }
         CRUMB(8, "net: first player position read");
-        char pkt[32]; uint32_t fl = 1; int32_t v;
+        char pkt[36]; uint32_t fl = 1; int32_t v;
         pkt[0] = 'J'; pkt[1] = 'E'; pkt[2] = 'C'; pkt[3] = '1'; g_seq++; memcpy(pkt + 4, (const void *)&g_seq, 4);
         v = g_pv[1]; memcpy(pkt + 8, &v, 4); v = g_pv[2]; memcpy(pkt + 12, &v, 4); v = g_pv[3]; memcpy(pkt + 16, &v, 4); memcpy(pkt + 20, &fl, 4);
-        pkt[3] = '2'; memcpy(pkt + 24, &g_myFc, 2); memcpy(pkt + 26, &g_myFs, 2); { int16_t a = (int16_t)g_myApp, h = (int16_t)g_myHead; memcpy(pkt + 28, &a, 2); memcpy(pkt + 30, &h, 2); }
+        pkt[3] = '3'; memcpy(pkt + 32, &g_myArea, 4); memcpy(pkt + 24, &g_myFc, 2); memcpy(pkt + 26, &g_myFs, 2); { int16_t a = (int16_t)g_myApp, h = (int16_t)g_myHead; memcpy(pkt + 28, &a, 2); memcpy(pkt + 30, &h, 2); }
         g_lastSent[0] = g_pv[1]; g_lastSent[1] = g_pv[2]; g_lastSent[2] = g_pv[3];
         g_stage = "sendto";
-        if (g_useSteam) { uint32_t before = g_sSent, eb = g_sSendErr; steam_send(pkt, 32); if (g_sSent != before) g_sent++; else if (g_sSendErr != eb) g_netErr++; }
-        else if (sendto(g_udp, pkt, 32, 0, &g_peer, sizeof g_peer) == 32) g_sent++; else g_netErr++;
+        if (g_useSteam) { uint32_t before = g_sSent, eb = g_sSendErr; steam_send(pkt, 36); if (g_sSent != before) g_sent++; else if (g_sSendErr != eb) g_netErr++; }
+        else if (sendto(g_udp, pkt, 36, 0, &g_peer, sizeof g_peer) == 36) g_sent++; else g_netErr++;
         g_stage = "net idle";
         CRUMB(16, "net: first packet sent");
         if (!g_haveRemote || !g_rvalid || now - g_lastRecvTick > 3000) { g_step = 0; return; }
+        /* 0.9.1: other area (or ours not read yet): no puppet. One that exists is switched off; a new one
+           is spawned beside the remote player once both are in the same area. */
+        if (!g_myArea || (g_rarea && g_rarea != g_myArea)) {
+            if (g_puppetState == 1) { vm_run("jbn_off", 0x7F000000); g_puppetState = 0; g_areaHides++; }
+            g_step = 0; return;
+        }
         if (g_puppetState == 0) {
             CRUMB(32, "net: first puppet spawn attempt");
             if (net_spawn_puppet(g_rx + 1.0f, g_ry, g_rz)) { g_puppetState = 1; g_spawns++; g_haveOrder = 0; g_appliedApp = g_appliedHead = -999; g_faceSet = -1; }
@@ -434,6 +460,9 @@ static void net_status(char *out) {
     s_cat(out, ",\"remoteHead\":"); i2s(a, g_rhead); s_cat(out, a);
     s_cat(out, ",\"appSets\":"); u2s(a, g_appSets); s_cat(out, a);
     s_cat(out, ",\"faceSets\":"); u2s(a, g_faceSets); s_cat(out, a);
+    s_cat(out, ",\"myArea\":"); i2s(a, g_myArea); s_cat(out, a);
+    s_cat(out, ",\"remoteArea\":"); i2s(a, g_rarea); s_cat(out, a);
+    s_cat(out, ",\"areaHides\":"); u2s(a, g_areaHides); s_cat(out, a);
     s_cat(out, ",\"noPlayerSkips\":"); u2s(a, g_noPlayerSkips); s_cat(out, a);
     s_cat(out, ",\"runOrders\":"); u2s(a, g_runOrders); s_cat(out, a);
     s_cat(out, ",\"walkOrders\":"); u2s(a, g_walkOrders); s_cat(out, a);

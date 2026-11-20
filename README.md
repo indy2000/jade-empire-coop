@@ -38,7 +38,8 @@ This mod does **not** bypass that check: it loads into the game after a normal s
 | Look and areas (0.8.0) | packet JEC2 (32 bytes) adds appearance, head and facing; the puppet takes the remote player's appearance (`client/looktest.py` 2/2, owner confirmed on screen); resurrection with EffectResurrection(TRUE) so the puppet also works after Two Rivers (FALSE left it dead there). Facing is sent but not applied: GetFacing(GetPlayer()) stays constant for the player |
 | Facing (0.8.1) | the player's real orientation is the unit vector at creature+0x50 (GetFacing on the player is stale); the standing puppet turns with SetFacingPoint. `client/looktest.py` 8/8 (incl. "after a walk", which was 6/8 before the fix), mutation 2/4; live check while the owner turned: every sample with A standing >= 2 s within 7 deg. Walking sideways/backwards is still shown as a forward walk |
 | Join from the host's save (0.9.0) | guest (`getsave 1`, armed with Ctrl+Shift+N even at the main menu) asks; host runs DoAutoSave and sends save.sac + SaveImage.tga over Steam channel 1 (reliable, 8 KB chunks, CRC32); guest writes `Save\Co-op - host` and loads it from the menu. `client/savetest.py` 3/3 twice (guest in game and at the main menu, files byte-identical to the host's autosave), mutation (host net off) 0/3; owner loaded it: same position (0.00 m) |
-| Combat sync, story sync, level transitions | not started |
+| Area changes (0.9.1) | packet JEC3 adds a hash of the area's tag (computed in NWScript: GetSubString/FindSubString, h*31+c); different areas -> the puppet is switched off; same area again -> a new one beside the remote player. Owner's door test on two copies: hidden on both after A crossed, respawned on both after B crossed (owner saw it). Also: NCS builder buffer 512 -> 4096 bytes (it cut longer scripts silently) |
+| Combat sync, story sync | not started |
 
 ## Layout
 
