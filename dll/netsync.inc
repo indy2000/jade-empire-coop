@@ -246,7 +246,9 @@ static void net_set_facing(float px, float py, float pz) {
 /* cos of the angle between the last applied and the current remote direction, *1e8 */
 static int32_t facedot(void) { return (int32_t)g_setFc * g_rfc + (int32_t)g_setFs * g_rfs; }
 
+static void cb_on_damage(const uint8_t *p, int n);
 #include "savexfer.inc"
+#include "combat.inc"
 
 static int net_parse_config(void) {
     char p[300], buf[512]; s_cpy(p, g_dir); s_cat(p, "bridge\\net.txt");
@@ -308,10 +310,11 @@ static void net_tick(void) {
     uint32_t now = GetTickCount();
     g_stage = "recv";
     for (int k = 0; k < 64; k++) {
-        char pkt[64]; int r;
+        char pkt[512]; int r;
         if (g_useSteam) r = steam_recv(pkt, sizeof pkt);
         else { SOCKADDR_IN4 from; int fl = sizeof from; r = recvfrom(g_udp, pkt, sizeof pkt, 0, &from, &fl); }
         if (r <= 0) break;
+        if (r >= 8 && pkt[0] == 'J' && pkt[1] == 'E' && pkt[2] == 'F' && pkt[3] == '1') { cb_on_snapshot(pkt, r); continue; }   /* 0.10.0 */
         if (r < 24 || pkt[0] != 'J' || pkt[1] != 'E' || pkt[2] != 'C' || !((pkt[3] == '1' && r == 24) || (pkt[3] == '2' && r == 32) || (pkt[3] == '3' && r == 36))) { g_bad++; continue; }
         if (pkt[3] == '3') { int32_t ar; memcpy(&ar, pkt + 32, 4); g_rarea = ar; } else g_rarea = 0;
         if (pkt[3] >= '2') { int16_t fc, fs, a, h; memcpy(&fc, pkt + 24, 2); memcpy(&fs, pkt + 26, 2); memcpy(&a, pkt + 28, 2); memcpy(&h, pkt + 30, 2);
@@ -334,6 +337,7 @@ static void net_tick(void) {
     if (g_netPaused) return;
     g_stage = "player check";
     if (!player_exists()) { g_noPlayerSkips++; g_step = 0; g_puppetState = 0; g_haveOrder = 0; g_myArea = 0; g_stage = "net idle"; return; }
+    g_stage = "combat"; cb_tick();
     g_stage = "net idle";
     if (now - g_lastRecvTick > 600) g_rvx = g_rvy = 0;        /* no fresh data: do not extrapolate */
     if (g_step == 0) { if (now - g_lastSendTick < 50) return; g_lastSendTick = now; }
@@ -471,6 +475,6 @@ static void net_status(char *out) {
     s_cat(out, ",\"remoteMm\":["); i2s(a, g_rxm); s_cat(out, a); s_cat(out, ",");
     i2s(a, g_rym); s_cat(out, a); s_cat(out, ","); i2s(a, g_rzm); s_cat(out, a); s_cat(out, "]");
     s_cat(out, ",\"lastRecvAgoMs\":"); if (g_lastRecvTick) { u2s(a, GetTickCount() - g_lastRecvTick); s_cat(out, a); } else s_cat(out, "-1");
-    if (g_useSteam) { steam_status(out); xf_status(out); }
+    if (g_useSteam) { steam_status(out); xf_status(out); cb_status(out); }
     s_cat(out, "}}");
 }

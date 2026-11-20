@@ -169,7 +169,7 @@ static BOOL (WINAPI *g_realPeek)(MSG_*, void*, unsigned, unsigned, unsigned);
 static uint16_t g_port;
 
 typedef struct { char method[48]; char resref[160]; const char *hex; int hexLen; char idtok[32]; uint32_t oid; int ival; int hasIval;
-                 char out[2048]; volatile int done; HANDLE ev; DWORD deadline; volatile int abandoned; } Req;
+                 char out[4096]; volatile int done; HANDLE ev; DWORD deadline; volatile int abandoned; } Req;
 #define QMAX 32
 static Req *g_q[QMAX]; static int g_qn;
 
@@ -407,7 +407,7 @@ static void reply(SOCKET s, const char *idtok, const char *body /* {"result":..}
     /* 0.8.1: was char buf[700] - je.netStatus with the Steam block (~950 chars since 0.7.0) and a 512-byte
        je.peek (1,050 chars) overflowed it and smashed the bridge thread's stack (the peek crashed the game).
        Req.out is 2048, so 2048 + the id fits; longer bodies are cut, never overflowed. */
-    char buf[2200]; s_cpy(buf, "{\"id\":"); s_cat(buf, idtok); s_cat(buf, ",");
+    char buf[4300]; s_cpy(buf, "{\"id\":"); s_cat(buf, idtok); s_cat(buf, ",");
     { uint32_t room = sizeof buf - s_len(buf) - 2, n = s_len(body + 1); if (n > room) n = room; char *d = buf + s_len(buf); memcpy(d, body + 1, n); d[n] = 0; }
     s_cat(buf, "\n");
     if (s) send(s, buf, (int)s_len(buf), 0); else if (g_fileOut) s_cat(g_fileOut, buf);
@@ -426,7 +426,7 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.9.1\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.10.0\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
@@ -487,7 +487,7 @@ static DWORD WINAPI file_thread(void *unused) {
     s_cpy(outDir, inDir); s_cat(outDir, "\\out\\"); s_cat(inDir, "\\in\\");
     CreateDirectoryA(inDir, 0); CreateDirectoryA(outDir, 0);
     s_cpy(pat, inDir); s_cat(pat, "*.json");
-    static char line[8192], out[4096];
+    static char line[8192], out[8192];
     /* Requests left over from an earlier process must never run in this one: drop them. */
     { FINDDATA fd; HANDLE fh = FindFirstFileA(pat, &fd); int dropped = 0;
       if (fh != (HANDLE)-1) { do { char rp[600]; s_cpy(rp, inDir); s_cat(rp, fd.name); DeleteFileA(rp); dropped++; } while (FindNextFileA(fh, &fd)); FindClose(fh); }
