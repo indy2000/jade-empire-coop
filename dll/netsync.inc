@@ -228,6 +228,8 @@ static void net_set_facing(float px, float py, float pz) {
 /* cos of the angle between the last applied and the current remote direction, *1e8 */
 static int32_t facedot(void) { return (int32_t)g_setFc * g_rfc + (int32_t)g_setFs * g_rfs; }
 
+#include "savexfer.inc"
+
 static int net_parse_config(void) {
     char p[300], buf[512]; s_cpy(p, g_dir); s_cat(p, "bridge\\net.txt");
     HANDLE h = CreateFileA(p, 0x80000000, 1, 0, 3, 0x80, 0); if (h == (HANDLE)-1) return 0;
@@ -244,6 +246,7 @@ static int net_parse_config(void) {
         } else if (s_str(line, "role host") == line) { g_steamHost = 1;
         } else if (s_str(line, "role join") == line) { g_steamHost = 0;
         } else if (s_str(line, "lobby ") == line) { g_wantLobby = s2u64(line + 6);
+        } else if (s_str(line, "getsave 1") == line) { g_getSave = 1;
         } else if (s_str(line, "template ") == line) { int i = 0; const char *q = line + 9; while (*q && *q != ' ' && i < 16) g_tpl[i++] = *q++; g_tpl[i] = 0; }
         *e = save; line = *e ? e + 1 : e;
     }
@@ -307,6 +310,7 @@ static void net_tick(void) {
           else if (best < 0) g_rvx = g_rvy = 0; }
         CRUMB(128, "net: first packet received");
     }
+    g_stage = "save xfer"; xf_tick();      /* 0.9.0: works without a loaded game (guest at the main menu) */
     g_stage = "net idle";
     if (g_netPaused) return;
     g_stage = "player check";
@@ -438,6 +442,6 @@ static void net_status(char *out) {
     s_cat(out, ",\"remoteMm\":["); i2s(a, g_rxm); s_cat(out, a); s_cat(out, ",");
     i2s(a, g_rym); s_cat(out, a); s_cat(out, ","); i2s(a, g_rzm); s_cat(out, a); s_cat(out, "]");
     s_cat(out, ",\"lastRecvAgoMs\":"); if (g_lastRecvTick) { u2s(a, GetTickCount() - g_lastRecvTick); s_cat(out, a); } else s_cat(out, "-1");
-    if (g_useSteam) steam_status(out);
+    if (g_useSteam) { steam_status(out); xf_status(out); }
     s_cat(out, "}}");
 }

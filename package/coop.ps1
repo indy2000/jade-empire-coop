@@ -1,4 +1,4 @@
-# Jade Empire Co-op 0.8.1 - instalador e atalhos.
+# Jade Empire Co-op 0.9.0 - instalador e atalhos.
 # Uso: chamado pelos arquivos .bat desta pasta (instalar, hospedar, entrar, mostrar-codigo, desinstalar).
 # Nunca altera a instalacao original do jogo: trabalha numa copia em %USERPROFILE%\JadeEmpireCoop\jogo.
 param([Parameter(Mandatory = $true)][ValidateSet('install', 'host', 'join', 'code', 'uninstall')][string]$Mode)
@@ -9,7 +9,7 @@ $Root = Join-Path $env:USERPROFILE 'JadeEmpireCoop'
 $Dest = Join-Path $Root 'jogo'
 $ExeHash = '0D25F18C028A7DFFFF9DD110B7BE677F7E9B63E1CAD86C1EB8E4E8E189C54FE5'   # JadeEmpire.exe v1.00 build 1510 (Steam)
 $Pins = [ordered]@{
-    'xinput9_1_0.dll' = '22360877E119F587A2454B7443298653EE7041758FBC4A680F85CFEA7CC296D6'   # jebridge 0.8.1
+    'xinput9_1_0.dll' = '0B703DAF4DD206682E094640E3FFDDFE256C622ABAB4019450CED9264CA47454'   # jebridge 0.9.0
     'steam_api.dll'   = 'FDAFB7C65EC7D4182B42BF92CC8671C68E4DC547CC6E613899D2618A47EB65DA'   # Steamworks.NET Standalone 2025.164.1, x86
 }
 $Template = 'j00h_abbot0'
@@ -70,7 +70,7 @@ function Start-Game {
 
 switch ($Mode) {
     'install' {
-        Say '== Jade Empire Co-op 0.8.1: instalacao =='
+        Say '== Jade Empire Co-op 0.9.0: instalacao =='
         foreach ($n in $Pins.Keys) {
             $p = Join-Path $Here "arquivos\$n"
             if (-not (Test-Path -LiteralPath $p)) { Fail "Falta arquivos\$n no pacote." }
@@ -123,17 +123,20 @@ switch ($Mode) {
         Remove-Item -LiteralPath (Join-Path $Dest 'bridge\lobby.txt') -ErrorAction SilentlyContinue
         Start-Game
         Say ''
-        Say 'Carregue o save, e com o personagem na tela aperte Ctrl+Shift+N (vai tocar um bipe).'
+        Say 'Carregue o seu save, e com o personagem na tela aperte Ctrl+Shift+N (vai tocar um bipe).'
         Say 'Depois rode mostrar-codigo.bat e mande o codigo para o seu amigo.'
+        Say 'Quando ele entrar, o jogo faz um salvamento automatico e envia para ele (fique no jogo).'
     }
     'join' {
         Assert-Installed
         $code = (Read-Host 'Cole o codigo do lobby que o host te mandou').Trim()
         if ($code -notmatch '^\d{15,20}$') { Fail 'Codigo invalido: deve ter so numeros (uns 18 digitos).' }
-        Write-Ascii (Join-Path $Dest 'bridge\net.txt') "transport steam`r`nrole join`r`nlobby $code`r`ntemplate $Template`r`n"
+        Write-Ascii (Join-Path $Dest 'bridge\net.txt') "transport steam`r`nrole join`r`nlobby $code`r`ntemplate $Template`r`ngetsave 1`r`n"
+        Remove-Item -LiteralPath (Join-Path $Dest 'bridge\save_received.txt') -ErrorAction SilentlyContinue
         Start-Game
         Say ''
-        Say 'Carregue o save, e com o personagem na tela aperte Ctrl+Shift+N (vai tocar um bipe).'
+        Say 'No MENU PRINCIPAL do jogo (sem carregar nada) aperte Ctrl+Shift+N: toca um bipe.'
+        Say 'Espere dois bipes seguidos (o save do host chegou) e carregue o save "Co-op - host".'
     }
     'code' {
         $f = Join-Path $Dest 'bridge\lobby.txt'

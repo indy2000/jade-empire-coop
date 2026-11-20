@@ -1,4 +1,4 @@
-﻿JADE EMPIRE CO-OP 0.8.1 (versão de teste)
+﻿JADE EMPIRE CO-OP 0.9.0 (versão de teste)
 =========================================
 
 O que esta versão faz: dois jogadores, cada um no seu PC, veem o personagem do outro
@@ -25,21 +25,22 @@ atualiza os arquivos do co-op (não copia o jogo de novo, os saves ficam).
 
 JOGAR
 -----
-Os dois devem estar na MESMA ÁREA do jogo (por exemplo, os dois carregando um
-save no mesmo lugar). O boneco do outro jogador tem a aparência do personagem dele.
-
 Quem hospeda:
 1. Rode hospedar.bat. O jogo abre.
-2. Carregue o save. Com o personagem na tela, aperte Ctrl+Shift+N (toca um bipe).
+2. Carregue o seu save. Com o personagem na tela, aperte Ctrl+Shift+N (toca um bipe).
 3. Espere uns 5 segundos e rode mostrar-codigo.bat. Ele mostra o código do lobby
    e já copia. Mande o código para o amigo.
+4. Continue no jogo: quando o amigo entrar, o jogo faz um salvamento automático
+   e envia para ele.
 
 Quem entra:
 1. Rode entrar.bat e cole o código que recebeu. O jogo abre.
-2. Carregue o save. Com o personagem na tela, aperte Ctrl+Shift+N (toca um bipe).
+2. No MENU PRINCIPAL (sem carregar nada), aperte Ctrl+Shift+N (toca um bipe).
+3. Espere DOIS bipes seguidos: o save do host chegou (uns segundos).
+4. Vá em carregar jogo e carregue o save "Co-op - host". Você começa exatamente
+   onde o host está.
 
-Em alguns segundos, cada um vê o personagem do outro ao seu lado: é o boneco do outro
-jogador. Ele segue o outro jogador quando o outro anda.
+Em alguns segundos, cada um vê o personagem do outro ao seu lado.
 
 Observações:
 - O Steam vai mostrar vocês jogando "Spacewar". É normal: é o app de teste

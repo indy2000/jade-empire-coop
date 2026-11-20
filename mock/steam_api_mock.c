@@ -173,13 +173,14 @@ EXP void __cdecl SteamAPI_SteamNetworkingIdentity_SetSteamID64(uint8_t *id, u64 
 EXP u64 __cdecl SteamAPI_SteamNetworkingIdentity_GetSteamID64(const uint8_t *id) { u64 v; memcpy(&v, id + 8, 8); return id[0] == 16 ? v : 0; }
 
 EXP int __cdecl SteamAPI_ISteamNetworkingMessages_SendMessageToUser(void *s, const uint8_t *id, const void *data, uint32_t size, int flags, int ch) {
-    (void)s; (void)flags; (void)ch;
-    if (!g_init || size > 1200) return 2;
+    (void)s; (void)flags;
+    /* 0.9.0: datagram = sender id (8) + channel (1) + data; up to 60000 bytes (save transfer chunks) */
+    if (!g_init || size > 60000 || ch < 0 || ch > 1) return 2;
     u64 to; memcpy(&to, id + 8, 8); if (to != g_peerId) return 2;
-    char pkt[1300]; memcpy(pkt, &g_id, 8); memcpy(pkt + 8, data, size);
+    static char pkt[60016]; memcpy(pkt, &g_id, 8); pkt[8] = (char)ch; memcpy(pkt + 9, data, size);
     SA4 a; memset(&a, 0, sizeof a); a.f = 2; a.addr = 0x0100007F; a.port = (unsigned short)((g_peerUdp >> 8) | (g_peerUdp << 8));
     g_sentToPeer = 1;                                  /* sending opens our side of the session */
-    return sendto(g_s, pkt, (int)size + 8, 0, &a, sizeof a) == (int)size + 8 ? 1 : 2;
+    return sendto(g_s, pkt, (int)size + 9, 0, &a, sizeof a) == (int)size + 9 ? 1 : 2;
 }
 EXP int __cdecl SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser(void *s, const uint8_t *id) {
     (void)s; u64 v; memcpy(&v, id + 8, 8); if (v == g_peerId) { g_accepted = 1; g_reqPending = 0; return 1; } return 0; }
@@ -192,27 +193,34 @@ static Msg *make_msg(const uint8_t *data, int size, u64 from) {
     SteamAPI_SteamNetworkingIdentity_SetSteamID64(m->identity, from);
     return m;
 }
+/* per-channel queues: the socket is drained into them, each call returns from the asked channel */
+static Msg *g_mq[2][1024]; static int g_mqh[2], g_mqn[2];
+static void q_push(int ch, Msg *m) { if (g_mqn[ch] < 1024) { g_mq[ch][(g_mqh[ch] + g_mqn[ch]) & 1023] = m; g_mqn[ch]++; } else SteamAPI_SteamNetworkingMessage_t_Release(m); }
 EXP int __cdecl SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel(void *s, int ch, Msg **out, int max) {
-    (void)s; (void)ch;
-    if (!g_init || max < 1) return 0;
+    (void)s;
+    if (!g_init || max < 1 || ch < 0 || ch > 1) return 0;
     int n = 0;
     if ((g_accepted || g_sentToPeer) && g_heldn) {           /* release held messages after accept */
         Msg *m = make_msg(g_held[0], g_heldLen[0], g_peerId);
         for (int i = 1; i < g_heldn; i++) { memcpy(g_held[i - 1], g_held[i], 64); g_heldLen[i - 1] = g_heldLen[i]; }
         g_heldn--; if (m) { out[n++] = m; return n; }
     }
-    char pkt[1300]; SA4 from; int fl = sizeof from;
-    int r = recvfrom(g_s, pkt, sizeof pkt, 0, &from, &fl);
-    if (r <= 8) return 0;
-    u64 sender; memcpy(&sender, pkt, 8);
-    if (sender != g_peerId) return 0;
-    g_heardPeer = 1;
-    if (!g_accepted && !g_sentToPeer) {                        /* stranger: hold + SessionRequest */
-        if (g_heldn < 16 && r - 8 <= 64) { memcpy(g_held[g_heldn], pkt + 8, (size_t)(r - 8)); g_heldLen[g_heldn] = r - 8; g_heldn++; }
-        if (!g_reqPending) { uint8_t ident[136]; SteamAPI_SteamNetworkingIdentity_SetSteamID64(ident, sender); push_cb(1251, ident, 136); g_reqPending = 1; }
-        return 0;
+    static char pkt[60016];
+    for (int guard = 0; guard < 256; guard++) {
+        SA4 from; int fl = sizeof from;
+        int r = recvfrom(g_s, pkt, sizeof pkt, 0, &from, &fl);
+        if (r <= 9) break;
+        u64 sender; memcpy(&sender, pkt, 8); int c = pkt[8] & 1;
+        if (sender != g_peerId) continue;
+        g_heardPeer = 1;
+        if (!g_accepted && !g_sentToPeer) {                    /* stranger: hold + SessionRequest */
+            if (c == 0 && g_heldn < 16 && r - 9 <= 64) { memcpy(g_held[g_heldn], pkt + 9, (size_t)(r - 9)); g_heldLen[g_heldn] = r - 9; g_heldn++; }
+            if (!g_reqPending) { uint8_t ident[136]; SteamAPI_SteamNetworkingIdentity_SetSteamID64(ident, sender); push_cb(1251, ident, 136); g_reqPending = 1; }
+            continue;
+        }
+        Msg *m = make_msg((uint8_t *)pkt + 9, r - 9, sender);
+        if (m) q_push(c, m);
     }
-    Msg *m = make_msg((uint8_t *)pkt + 8, r - 8, sender);
-    if (m) out[n++] = m;
+    if (g_mqn[ch]) { out[n++] = g_mq[ch][g_mqh[ch]]; g_mqh[ch] = (g_mqh[ch] + 1) & 1023; g_mqn[ch]--; }
     return n;
 }
