@@ -36,7 +36,7 @@ static uint8_t g_cbFightId, g_cbRid; static uint32_t g_cbRtick;
    the puppet's id into +0x5a4 every frame for the puppet's enemies, measures the puppet's health and
    sends what it lost to the guest ('JEPH'), who takes it off its own player. */
 #define CB_ID_INVALID (*(volatile uint32_t *)0x0075B394)
-static uint32_t g_cbMyOid; static int g_cbMyHp = -1; static uint32_t g_cbHeals, g_cbHealed;
+static uint32_t g_cbMyOid; static int g_cbMyHp = -1, g_cbHealReset; static uint32_t g_cbHeals, g_cbHealed;
 static uint32_t g_cbPupOid, g_cbPupTick, g_cbAssignTick, g_cbPupHits, g_cbPupDmg, g_cbHitsIn; static int g_cbPupHp = -1, g_cbPupMax;
 static uint32_t g_cbSnapTick, g_cbEnumTick, g_cbSnaps, g_cbSnapsIn, g_cbDmgSent, g_cbDmgApplied, g_cbKills, g_cbSets, g_cbMoves, g_cbFreezes;
 
@@ -133,7 +133,7 @@ static void cb_enum_step(int base, int guest) {
 }
 /* 0.10.1: also forget the host's last snapshot: after a reload the guest matched its new enemies to
    the dead ones of the previous fight (same tags, same places) and killed them */
-static void cb_reset(void) { memset(g_cbH, 0, sizeof g_cbH); memset(g_cbL, 0, sizeof g_cbL); memset(g_cbR, 0, sizeof g_cbR); g_cbRtick = 0; g_cbPupOid = 0; g_cbPupHp = -1; g_cbPupTick = 0; g_cbMyHp = -1; g_cbMyOid = 0; g_cbNH = g_cbNL = 0; g_cbEnumC = 0; g_cbHenchDone = 0; }
+static void cb_reset(void) { memset(g_cbH, 0, sizeof g_cbH); memset(g_cbL, 0, sizeof g_cbL); memset(g_cbR, 0, sizeof g_cbR); g_cbRtick = 0; g_cbPupOid = 0; g_cbPupHp = -1; g_cbPupTick = 0; g_cbMyHp = -1; g_cbMyOid = 0; g_cbHealReset = 1; g_cbNH = g_cbNL = 0; g_cbEnumC = 0; g_cbHenchDone = 0; }
 
 static void cb_send_hits(int d) { uint8_t q[12]; memcpy(q, "JEPH", 4); memcpy(q + 4, &d, 4); memset(q + 8, 0, 4); if (xf_send(q, 12)) g_cbPupHits++; g_cbPupDmg += (uint32_t)d; }
 static void cb_host_puppet(uint32_t now) {
@@ -186,11 +186,18 @@ static void cb_on_hits(const uint8_t *p, int n) {
 }
 /* guest: our enemies fight locally (animations), but only the host's hits count: local hits are healed
    back (EffectModifyHealth #746, instant), and a minimum health of 1 keeps a local hit from killing us */
+static uint32_t g_cbHealTick; static int g_cbHealLogs;
+static void cb_log3(const char *what, int a, int b, int c2);
 static void cb_guest_heal(void) {
+    /* 0.11.0: one heal, then 300 ms before looking again: in one run 790 heals of exactly 20 were counted
+       for a few hits, so the heal seemed to show up in GetHealth only a while later (unknown) */
+    if (g_cbHealReset) { g_cbHealReset = 0; g_cbHealLogs = 0; }
+    uint32_t now = GetTickCount(); if (now - g_cbHealTick < 300) return;
     int hp = cb_my_hp(); if (hp < 0) return;
+    if (hp < g_cbMyHp && g_cbHealLogs < 30) { g_cbHealLogs++; cb_log3("heal back: hp read, expected, ms since last heal", hp, g_cbMyHp, (int)(now - g_cbHealTick)); }
     if (g_cbMyHp < 0) { g_cbMyHp = hp; cb_my_minhp(1); return; }
     if (hp < g_cbMyHp) { int d = g_cbMyHp - hp; Ncs b; n_void_main_begin(&b); n_constf(&b, 0.0f); n_consti(&b, d); n_action(&b, 746, 1); n_consti(&b, 0); n_action(&b, R_GETPLAYER, 0); n_action(&b, R_APPLYEFFECT, 4); cb_run("jbc_hl", &b);
-                         g_cbHeals++; g_cbHealed += (uint32_t)d; }
+                         g_cbHeals++; g_cbHealed += (uint32_t)d; g_cbHealTick = now; }
     else g_cbMyHp = hp;   /* healed by the game (potions, regeneration): accept */
 }
 static void cb_host_tick(uint32_t now) {
