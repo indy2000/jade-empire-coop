@@ -1,4 +1,4 @@
-﻿JADE EMPIRE CO-OP 0.10.0 (versão de teste)
+﻿JADE EMPIRE CO-OP 0.10.1 (versão de teste)
 ==========================================
 
 O que esta versão faz: dois jogadores, cada um no seu PC, veem o personagem do outro

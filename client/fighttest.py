@@ -44,6 +44,11 @@ def matched():
 r = wait(matched, 15)
 A(); h = st()["combat"]; B(); g = st()["combat"]
 chk("both fight, B matched its enemies to A's", r is not None, {"A host": h["host"], "B local": g["local"], "B snapsIn": g["snapsIn"], "B freezes": g["freezes"]})
+# 0.10.1: after a reload B killed its new enemies (matched to the previous fight's dead ones)
+if r:
+    hd = {e[0]: e[2] for e in r[0]["host"]}
+    bad = [l for l in r[1]["local"] if l[3] and l[1] >= 0 and not hd.get(l[1], 0)]
+    chk("no enemy dead on B while A's is alive", not bad, {"B dead but A alive": bad})
 if r:
     h, g, alive, m = r
     j = alive[0][0]; l = [x for x in g["local"] if x[1] == j][0][0]
@@ -58,5 +63,9 @@ if r:
     A(); kill(220 + k)
     ok = wait(lambda: (B(), dead(240 + lk))[1], 5)
     chk("A kills enemy %d: it dies in B" % k, bool(ok), {"B dead": dead(240 + lk)})
+    if k != j:   # 0.10.1: the guest's killing blow did not reach the host
+        B(); kill(240 + l)
+        ok = wait(lambda: (A(), dead(220 + j))[1], 5)
+        A(); chk("B kills enemy %d: it dies in A" % j, bool(ok), {"A dead": dead(220 + j), "A hp": hp(220 + j)})
 B(); jeb.call("je.netTune", {"value": 0})
 print("SUMMARY: %d/%d passed%s" % (sum(res), len(res), " (MUTATION: no combat sync on B)" if MUT else ""))

@@ -26,6 +26,7 @@ typedef struct { int used; int32_t tag; int16_t sx, sy; int hp, dead; int32_t x,
 typedef struct { int valid; int32_t tag; int16_t sx, sy; int hp, dead; int32_t x, y, z; } CbRemote;
 static CbHost g_cbH[CB_MAX]; static CbLocal g_cbL[CB_MAX]; static CbRemote g_cbR[CB_MAX];
 static int g_cbInFight, g_cbEnumC, g_cbRead, g_cbNH, g_cbNL, g_cbHenchDone;
+static uint8_t g_cbFightId, g_cbRid; static uint32_t g_cbRtick;
 static uint32_t g_cbSnapTick, g_cbEnumTick, g_cbSnaps, g_cbSnapsIn, g_cbDmgSent, g_cbDmgApplied, g_cbKills, g_cbSets, g_cbMoves, g_cbFreezes;
 
 static uint32_t cb_watch_addr(int i) { return i ? (uint32_t)(uintptr_t)&g_cbH[0].used : (uint32_t)(uintptr_t)&g_cbInFight; }
@@ -96,7 +97,9 @@ static void cb_enum_step(int base, int guest) {
     if (guest) { CbLocal *L = &g_cbL[j]; memset(L, 0, sizeof *L); L->used = 1; L->tag = tag; L->sx = (int16_t)(x / 100); L->sy = (int16_t)(y / 100); L->match = -1; L->lastSet = -1; g_cbNL++; cb_freeze(base + j); }
     else { CbHost *H = &g_cbH[j]; memset(H, 0, sizeof *H); H->used = 1; H->tag = tag; H->sx = (int16_t)(x / 100); H->sy = (int16_t)(y / 100); g_cbNH++; }
 }
-static void cb_reset(void) { memset(g_cbH, 0, sizeof g_cbH); memset(g_cbL, 0, sizeof g_cbL); g_cbNH = g_cbNL = 0; g_cbEnumC = 0; g_cbHenchDone = 0; }
+/* 0.10.1: also forget the host's last snapshot: after a reload the guest matched its new enemies to
+   the dead ones of the previous fight (same tags, same places) and killed them */
+static void cb_reset(void) { memset(g_cbH, 0, sizeof g_cbH); memset(g_cbL, 0, sizeof g_cbL); memset(g_cbR, 0, sizeof g_cbR); g_cbRtick = 0; g_cbNH = g_cbNL = 0; g_cbEnumC = 0; g_cbHenchDone = 0; }
 
 static void cb_host_tick(uint32_t now) {
     /* enumerate (one candidate per frame) for the first 4 s of a fight and then every 2 s for 1 s */
@@ -116,7 +119,7 @@ static void cb_host_tick(uint32_t now) {
             e[0] = (uint8_t)j; e[1] = (uint8_t)H->dead; memcpy(e + 2, &hp, 2); memcpy(e + 4, &H->tag, 4); memcpy(e + 8, &H->sx, 2); memcpy(e + 10, &H->sy, 2);
             memcpy(e + 12, &H->x, 4); memcpy(e + 16, &H->y, 4); memcpy(e + 20, &H->z, 4); e[24] = e[25] = 0;
         }
-        p[4] = (uint8_t)n; p[5] = p[6] = p[7] = 0;
+        p[4] = (uint8_t)n; p[5] = g_cbFightId; p[6] = p[7] = 0;
         if (n) { steam_send((const char *)p, 8 + 26 * n); g_cbSnaps++; }
     }
 }
@@ -134,7 +137,9 @@ static void cb_on_damage(const uint8_t *p, int n) {
 static void cb_on_snapshot(const char *pkt, int r) {
     if (g_steamHost || r < 8) return;
     int n = (uint8_t)pkt[4]; if (n > CB_MAX || 8 + 26 * n > r) return;
-    memset(g_cbR, 0, sizeof g_cbR);
+    if (!g_cbInFight) return;                     /* a snapshot only counts during our own fight */
+    if ((uint8_t)pkt[5] != g_cbRid) { g_cbRid = (uint8_t)pkt[5]; for (int l = 0; l < CB_MAX; l++) g_cbL[l].match = -1; }   /* host's new fight: match again */
+    memset(g_cbR, 0, sizeof g_cbR); g_cbRtick = GetTickCount();
     for (int k = 0; k < n; k++) {
         const uint8_t *e = (const uint8_t *)pkt + 8 + 26 * k; int j = e[0]; if (j >= CB_MAX) continue;
         CbRemote *R = &g_cbR[j]; int16_t hp; R->valid = 1; R->dead = e[1]; memcpy(&hp, e + 2, 2); R->hp = hp; memcpy(&R->tag, e + 4, 4);
@@ -145,6 +150,7 @@ static void cb_on_snapshot(const char *pkt, int r) {
 static void cb_guest_tick(uint32_t now) {
     if (!g_cbHenchDone) { cb_hench_out(); g_cbHenchDone = 1; }
     if (now - g_cbEnumTick < 4000 || ((now - g_cbEnumTick) % 2000) < 1000) cb_enum_step(CB_GSLOT, 1);
+    if (!g_cbRtick || now - g_cbRtick > 1500) return;   /* no fresh snapshot from the host's current fight */
     /* match: host enemy j <-> unmatched local enemy with the same tag, nearest start position (<= 8 m) */
     for (int j = 0; j < CB_MAX; j++) {
         if (!g_cbR[j].valid) continue; int have = 0;
@@ -161,8 +167,11 @@ static void cb_guest_tick(uint32_t now) {
         rr = (l + 1) % CB_MAX; CbRemote *R = &g_cbR[L->match];
         if (R->tag != L->tag) { L->match = -1; break; } int slot = CB_GSLOT + l, hp = 0, dead = 0;
         if (!cb_slot_int(slot, 49, &hp) || !cb_slot_int(slot, 140, &dead)) break;
-        if (dead) { L->dead = 1; break; }
-        if (R->dead) { cb_kill(slot); L->dead = 1; break; }
+        if (R->dead) { if (!dead) cb_kill(slot); L->dead = 1; break; }
+        if (dead) {                                                   /* 0.10.1: the guest's killing blow reaches the host */
+            if (!L->dead) { uint8_t q[16]; uint32_t jj = (uint32_t)L->match; int32_t d = 1000000; memcpy(q, "JEDM", 4); memcpy(q + 4, &jj, 4); memcpy(q + 8, &R->tag, 4); memcpy(q + 12, &d, 4);
+                            if (xf_send(q, 16)) g_cbDmgSent++; }
+            L->dead = 1; break; }
         if (L->lastSet >= 0 && hp < L->lastSet) {                    /* the guest hit it */
             uint8_t q[16]; uint32_t jj = (uint32_t)L->match; int32_t d = L->lastSet - hp; memcpy(q, "JEDM", 4); memcpy(q + 4, &jj, 4); memcpy(q + 8, &R->tag, 4); memcpy(q + 12, &d, 4);
             if (xf_send(q, 16)) g_cbDmgSent++; L->lastSet = hp; L->pend = now; break;
@@ -192,7 +201,7 @@ static void cb_tick(void) {
     if (g_cbInFight != g_cbShadow) { cb_log3("FLAG CHANGED OUTSIDE cb_tick: shadow, now, table entries", g_cbShadow, g_cbInFight, cb_used()); g_cbInFight = g_cbShadow; }
     static int lastUsed; int u0 = cb_used(); if (lastUsed && !u0) cb_log3("table emptied before this tick: had, now, inFight", lastUsed, u0, g_cbInFight);
     static uint32_t lastCheck; if (now - lastCheck >= 500) { lastCheck = now; int f = cb_in_fight();
-        if (f && !g_cbInFight) { cb_reset(); g_cbEnumTick = now; logline(g_steamHost ? "combat: fight started (host)" : "combat: fight started (guest)"); }
+        if (f && !g_cbInFight) { cb_reset(); g_cbEnumTick = now; g_cbFightId++; logline(g_steamHost ? "combat: fight started (host)" : "combat: fight started (guest)"); }
         if (!f && g_cbInFight) logline("combat: fight over");
         g_cbInFight = f; g_cbShadow = f; }
     lastUsed = cb_used();
