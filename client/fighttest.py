@@ -20,7 +20,13 @@ def st():   # retry: one status reply in a run came back without its combat bloc
         if "combat" in r: return r
         time.sleep(0.3)
     return r
-def ival(d): bot.load("jx_ft", d); return bot.ev("jx_ft")
+def ival(d):   # retry: one eval reply came back without a value (seen once)
+    bot.load("jx_ft", d)
+    for _ in range(5):
+        r = jeb.call("je.evalScript", {"resref": "jx_ft"}).get("result", {})
+        if "value" in r: return r["value"]
+        time.sleep(0.2)
+    raise RuntimeError("eval without value")
 def hp(slot): return ival(ncs.slot_int(slot, 49))
 def dead(slot): return ival(ncs.slot_int(slot, 140))
 def set_hp(slot, v): bot.load("jx_fs", ncs.void_main(ncs.CONSTI(v) + ncs.slot_push(slot) + ncs.ACTION(156, 2))); bot.run("jx_fs")
@@ -60,8 +66,9 @@ if r:
         return h if h["onPuppet"] and len(h["onPuppet"]) < len(alive) else None
     sp = wait(split, 10); A(); h = st()["combat"]
     chk("A: the enemies split between A's player and B's puppet", sp is not None, {"onPuppet": h["onPuppet"], "host": h["host"], "pupOid": h["pupOid"]})
-    # GetMaxHealth(player) read 0 on B once, so "refill" sets a fixed 100 (script view of health)
-    B(); bot.load("jx_rf", ncs.void_main(ncs.CONSTI(100) + G() + ncs.ACTION(156, 2))); bot.run("jx_rf")
+    # no refill: SetHealth on the player confuses the heal-back (it saw 100 < expected 120 and healed every
+    # 300 ms without GetHealth moving). Start from B's health as it is.
+    B()
     hb0 = ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4)); A(); dmg0 = st()["combat"]["pupDmg"]
     def hurt():
         B(); g = st()["combat"]; hb = ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4))

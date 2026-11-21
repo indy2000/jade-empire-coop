@@ -190,7 +190,7 @@ static void cb_on_hits(const uint8_t *p, int n) {
 }
 /* guest: our enemies fight locally (animations), but only the host's hits count: local hits are healed
    back (EffectModifyHealth #746, instant), and a minimum health of 1 keeps a local hit from killing us */
-static uint32_t g_cbHealTick; static int g_cbHealLogs;
+static uint32_t g_cbHealTick; static int g_cbHealLogs, g_cbLastHealHp = -1;
 static void cb_log3(const char *what, int a, int b, int c2);
 static void cb_guest_heal(void) {
     /* 0.11.0: one heal, then 300 ms before looking again: in one run 790 heals of exactly 20 were counted
@@ -200,9 +200,12 @@ static void cb_guest_heal(void) {
     int hp = cb_my_hp(); if (hp < 0) return;
     if (hp < g_cbMyHp && g_cbHealLogs < 30) { g_cbHealLogs++; cb_log3("heal back: hp read, expected, ms since last heal", hp, g_cbMyHp, (int)(now - g_cbHealTick)); }
     if (g_cbMyHp < 0) { g_cbMyHp = hp; cb_my_minhp(1); return; }
-    if (hp < g_cbMyHp) { int d = g_cbMyHp - hp; Ncs b; n_void_main_begin(&b); n_constf(&b, 0.0f); n_consti(&b, d); n_action(&b, 746, 1); n_consti(&b, 0); n_action(&b, R_GETPLAYER, 0); n_action(&b, R_APPLYEFFECT, 4); cb_run("jbc_hl", &b);
+    /* the last heal did not move GetHealth at all (seen after a SetHealth on the player: 100 read, 120
+       expected, healed every 300 ms): give up on that difference instead of healing forever */
+    if (hp < g_cbMyHp && hp == g_cbLastHealHp) { g_cbMyHp = hp; g_cbLastHealHp = -1; return; }
+    if (hp < g_cbMyHp) { int d = g_cbMyHp - hp; g_cbLastHealHp = hp; Ncs b; n_void_main_begin(&b); n_constf(&b, 0.0f); n_consti(&b, d); n_action(&b, 746, 1); n_consti(&b, 0); n_action(&b, R_GETPLAYER, 0); n_action(&b, R_APPLYEFFECT, 4); cb_run("jbc_hl", &b);
                          g_cbHeals++; g_cbHealed += (uint32_t)d; g_cbHealTick = now; }
-    else g_cbMyHp = hp;   /* healed by the game (potions, regeneration): accept */
+    else { g_cbMyHp = hp; g_cbLastHealHp = -1; }   /* healed by the game (potions, regeneration): accept */
 }
 static void cb_host_tick(uint32_t now) {
     cb_host_puppet(now);
