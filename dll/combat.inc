@@ -172,10 +172,9 @@ static void cb_host_puppet(uint32_t now) {
 /* guest: the host's enemies hit our puppet there -> take it off our player */
 static void cb_on_hits(const uint8_t *p, int n) {
     if (g_steamHost || n < 8 || !player_exists()) return; int32_t d; memcpy(&d, p + 4, 4); if (d <= 0 || d > 100000) return;
-    int hp = 0; Ncs a; n_int_main_begin(&a); n_action(&a, R_GETPLAYER, 0); n_action(&a, 49, 1); if (!cb_eval(&a, 4, &hp)) return;
-    int nh = hp - d; if (nh < 0) nh = 0;
-    Ncs b; n_void_main_begin(&b); n_consti(&b, nh); n_action(&b, R_GETPLAYER, 0); n_action(&b, 156, 2); cb_run("jbc_ph", &b);
-    if (nh == 0) { Ncs c; n_void_main_begin(&c); n_constf(&c, 0.0f); n_consti(&c, 0); n_action(&c, 927, 1); n_consti(&c, 0); n_action(&c, R_GETPLAYER, 0); n_action(&c, R_APPLYEFFECT, 4); cb_run("jbc_pd", &c); }
+    /* EffectDamageHealth (#771), instant: SetHealth on the player changed what GetHealth reads but not the
+       health bar, and the player did not die at 0 (owner, copy B); the damage effect moves the bar. */
+    Ncs b; n_void_main_begin(&b); n_constf(&b, 0.0f); n_consti(&b, d); n_action(&b, 771, 1); n_consti(&b, 0); n_action(&b, R_GETPLAYER, 0); n_action(&b, R_APPLYEFFECT, 4); cb_run("jbc_ph", &b);
     g_cbHitsIn++;
 }
 static void cb_host_tick(uint32_t now) {

@@ -60,7 +60,8 @@ if r:
         return h if h["onPuppet"] and len(h["onPuppet"]) < len(alive) else None
     sp = wait(split, 10); A(); h = st()["combat"]
     chk("A: the enemies split between A's player and B's puppet", sp is not None, {"onPuppet": h["onPuppet"], "host": h["host"], "pupOid": h["pupOid"]})
-    B(); bot.load("jx_rf", ncs.void_main(G() + ncs.ACTION(50, 1) + G() + ncs.ACTION(156, 2))); bot.run("jx_rf")   # refill B's health first
+    # GetMaxHealth(player) read 0 on B once, so "refill" sets a fixed 100 (script view of health)
+    B(); bot.load("jx_rf", ncs.void_main(ncs.CONSTI(100) + G() + ncs.ACTION(156, 2))); bot.run("jx_rf")
     hb0 = ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4))
     def hurt():
         B(); g = st()["combat"]; hb = ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4))
