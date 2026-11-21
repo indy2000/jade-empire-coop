@@ -1,4 +1,4 @@
-﻿JADE EMPIRE CO-OP 0.11.0 (versão de teste)
+﻿JADE EMPIRE CO-OP 0.10.1 (versão de teste)
 ==========================================
 
 O que esta versão faz: dois jogadores, cada um no seu PC, veem o personagem do outro
@@ -6,10 +6,8 @@ andando no mundo, entram pelo save do host e trocam de área juntos.
 NOVO: combate (primeira versão). Os inimigos são controlados pelo jogo do host:
 - a vida dos inimigos e as mortes aparecem nos dois jogos;
 - os golpes de quem entrou tiram vida do inimigo no jogo do host.
-- NOVO na 0.11: o inimigo mais perto de quem entrou luta contra ele de verdade;
-  no jogo do host esse inimigo deixa o host em paz e fica perto do outro jogador.
-Ainda NÃO tem: animações de ataque no jogo do outro (o inimigo que luta com quem
-entrou aparece parado ao lado dele no jogo do host), história sincronizada.
+Ainda NÃO tem: inimigos atacando quem entrou (no jogo de quem entrou eles ficam
+parados), animações de ataque do outro jogador, história sincronizada.
 No jogo de quem entrou, a companheira (ex.: Dawn Star) fica fora da luta.
 
 Precisa de:

@@ -27,16 +27,6 @@ typedef struct { int valid; int32_t tag; int16_t sx, sy; int hp, dead; int32_t x
 static CbHost g_cbH[CB_MAX]; static CbLocal g_cbL[CB_MAX]; static CbRemote g_cbR[CB_MAX];
 static int g_cbInFight, g_cbEnumC, g_cbRead, g_cbNH, g_cbNL, g_cbHenchDone;
 static uint8_t g_cbFightId, g_cbRid; static uint32_t g_cbRtick;
-/* 0.11.0: guest only. The host's enemies only ever target the host's player (scripts could not make
-   them fight our puppet: faction change, LockCombatTarget, puppet AI on: no effect). So on the guest
-   the nearest enemy gets its own combat AI back and fights the guest's player there; the others stay
-   frozen and copy the host. Health and deaths still come from the host. */
-static int g_cbEng = -1; static uint32_t g_cbEngTick, g_cbEngages; static int32_t g_cbPx, g_cbPy;
-/* Host side of it: that enemy would also keep hitting the host's player (owner saw one enemy fight both
-   players at once). The guest reports it ('JEEN': host index, tag, local x/y/z, every 300 ms; index -1 =
-   released); the host turns that enemy's AI off and moves it to where it is in the guest's game, next
-   to our puppet. Released after -1 or 2 s without a report. */
-static int g_cbGEng = -1; static int32_t g_cbGEx, g_cbGEy, g_cbGEz; static uint32_t g_cbGEtick, g_cbGEmove, g_cbEngSent, g_cbEngIn;
 static uint32_t g_cbSnapTick, g_cbEnumTick, g_cbSnaps, g_cbSnapsIn, g_cbDmgSent, g_cbDmgApplied, g_cbKills, g_cbSets, g_cbMoves, g_cbFreezes;
 
 static uint32_t cb_watch_addr(int i) { return i ? (uint32_t)(uintptr_t)&g_cbH[0].used : (uint32_t)(uintptr_t)&g_cbInFight; }
@@ -82,7 +72,6 @@ static void cb_copy_tmp(int slot) { Ncs s; n_void_main_begin(&s); n_push_slot(&s
 static void cb_freeze(int slot) { Ncs s; n_void_main_begin(&s); n_consti(&s, 1); n_push_slot(&s, slot); n_action(&s, 935, 2); cb_run("jbc_frz", &s); g_cbFreezes++; }
 static void cb_set_health(int slot, int hp) { Ncs s; n_void_main_begin(&s); n_consti(&s, hp); n_push_slot(&s, slot); n_action(&s, 156, 2); cb_run("jbc_sh", &s); g_cbSets++; }
 static void cb_kill(int slot) { Ncs s; n_void_main_begin(&s); n_constf(&s, 0.0f); n_consti(&s, 0); n_action(&s, 927, 1); n_consti(&s, 0); n_push_slot(&s, slot); n_action(&s, R_APPLYEFFECT, 4); cb_run("jbc_kill", &s); g_cbKills++; }
-static void cb_ai(int slot, int on) { Ncs s; n_void_main_begin(&s); n_consti(&s, on ? 0 : 1); n_push_slot(&s, slot); n_action(&s, 935, 2); cb_run("jbc_ai", &s); }
 static void cb_hench_out(void) { Ncs s; n_void_main_begin(&s); n_consti(&s, 1); n_action(&s, 326 /* GetSelectedHenchman */, 0); n_action(&s, 1045, 2); cb_run("jbc_hf", &s); }
 static void cb_move(int slot, float x, float y, float z, int run, int jump) {
     Ncs s; n_void_main_begin(&s); n_action(&s, R_CLEARALLACTIONS, 0);
@@ -110,17 +99,9 @@ static void cb_enum_step(int base, int guest) {
 }
 /* 0.10.1: also forget the host's last snapshot: after a reload the guest matched its new enemies to
    the dead ones of the previous fight (same tags, same places) and killed them */
-static void cb_reset(void) { memset(g_cbH, 0, sizeof g_cbH); memset(g_cbL, 0, sizeof g_cbL); memset(g_cbR, 0, sizeof g_cbR); g_cbRtick = 0; g_cbEng = -1; g_cbGEng = -1; g_cbNH = g_cbNL = 0; g_cbEnumC = 0; g_cbHenchDone = 0; }
+static void cb_reset(void) { memset(g_cbH, 0, sizeof g_cbH); memset(g_cbL, 0, sizeof g_cbL); memset(g_cbR, 0, sizeof g_cbR); g_cbRtick = 0; g_cbNH = g_cbNL = 0; g_cbEnumC = 0; g_cbHenchDone = 0; }
 
-static void cb_host_release(void);
 static void cb_host_tick(uint32_t now) {
-    if (g_cbGEng >= 0) {
-        if (now - g_cbGEtick > 2000 || g_cbH[g_cbGEng].dead) cb_host_release();
-        else if (now - g_cbGEmove > 500 && (g_cbGEx || g_cbGEy)) { g_cbGEmove = now; CbHost *H = &g_cbH[g_cbGEng];
-            float dx = (g_cbGEx - H->x) / 1000.0f, dy = (g_cbGEy - H->y) / 1000.0f, d2 = dx * dx + dy * dy;
-            if (d2 > 10.0f * 10.0f) cb_move(CB_HSLOT + g_cbGEng, g_cbGEx / 1000.0f, g_cbGEy / 1000.0f, g_cbGEz / 1000.0f, 0, 1);
-            else if (d2 > 1.5f * 1.5f) cb_move(CB_HSLOT + g_cbGEng, g_cbGEx / 1000.0f, g_cbGEy / 1000.0f, g_cbGEz / 1000.0f, d2 > 4.0f * 4.0f, 0); }
-    }
     /* enumerate (one candidate per frame) for the first 4 s of a fight and then every 2 s for 1 s */
     if (now - g_cbEnumTick < 4000 || ((now - g_cbEnumTick) % 2000) < 1000) cb_enum_step(CB_HSLOT, 0);
     /* read one enemy per frame */
@@ -141,21 +122,6 @@ static void cb_host_tick(uint32_t now) {
         p[4] = (uint8_t)n; p[5] = g_cbFightId; p[6] = p[7] = 0;
         if (n) { steam_send((const char *)p, 8 + 26 * n); g_cbSnaps++; }
     }
-}
-/* guest: tell the host which enemy fights us and where it is (sent every 500 ms while engaged) */
-static void cb_send_engage(void) {
-    uint8_t q[24]; int32_t j = -1, tag = 0, x = 0, y = 0, z = 0;
-    if (g_cbEng >= 0 && g_cbL[g_cbEng].match >= 0) { CbLocal *L = &g_cbL[g_cbEng]; j = L->match; tag = L->tag; x = L->x; y = L->y; z = L->z; }
-    memcpy(q, "JEEN", 4); memcpy(q + 4, &j, 4); memcpy(q + 8, &tag, 4); memcpy(q + 12, &x, 4); memcpy(q + 16, &y, 4); memcpy(q + 20, &z, 4);
-    if (xf_send(q, 24)) g_cbEngSent++;
-}
-static void cb_host_release(void) { if (g_cbGEng >= 0 && g_cbH[g_cbGEng].used && !g_cbH[g_cbGEng].dead) cb_ai(CB_HSLOT + g_cbGEng, 1); g_cbGEng = -1; }
-static void cb_on_engage(const uint8_t *p, int n) {
-    if (!g_steamHost || n < 24 || !g_cbInFight || !player_exists()) return;
-    int32_t j, tag; memcpy(&j, p + 4, 4); memcpy(&tag, p + 8, 4); g_cbEngIn++;
-    if (j < 0 || j >= CB_MAX || !g_cbH[j].used || g_cbH[j].tag != tag) { cb_host_release(); return; }
-    if (j != g_cbGEng) { cb_host_release(); g_cbGEng = j; cb_ai(CB_HSLOT + j, 0); }
-    memcpy(&g_cbGEx, p + 12, 4); memcpy(&g_cbGEy, p + 16, 4); memcpy(&g_cbGEz, p + 20, 4); g_cbGEtick = GetTickCount();
 }
 /* host: a guest hit enemy j for d */
 static void cb_on_damage(const uint8_t *p, int n) {
@@ -195,22 +161,6 @@ static void cb_guest_tick(uint32_t now) {
             int32_t dx = L->sx - g_cbR[j].sx, dy = L->sy - g_cbR[j].sy, d2 = dx * dx + dy * dy; if (d2 <= bd) { bd = d2; best = l; } }
         if (best >= 0) g_cbL[best].match = j;
     }
-    /* pick the enemy that fights the guest: nearest alive matched one within 6 m; keep it until it is
-       dead or 10 m away (tune 64 = off, for mutation runs) */
-    if (!(g_tune & 64) && now - g_cbEngTick >= 500) {
-        g_cbEngTick = now; Ncs a; int v = 0;
-        n_int_main_begin(&a); n_action(&a, R_GETPLAYER, 0); n_pos_component(&a, 0); if (cb_eval(&a, 16, &v)) g_cbPx = v;
-        Ncs b; n_int_main_begin(&b); n_action(&b, R_GETPLAYER, 0); n_pos_component(&b, 1); if (cb_eval(&b, 16, &v)) g_cbPy = v;
-        int best = -1; float bd = 6.0f * 6.0f, cur = -1.0f;
-        for (int l = 0; l < CB_MAX; l++) { CbLocal *L = &g_cbL[l]; if (!L->used || L->dead || L->match < 0 || (!L->x && !L->y)) continue;
-            float dx = (L->x - g_cbPx) / 1000.0f, dy = (L->y - g_cbPy) / 1000.0f, d2 = dx * dx + dy * dy;
-            if (l == g_cbEng) cur = d2; if (d2 < bd) { bd = d2; best = l; } }
-        if (g_cbEng >= 0 && (g_cbL[g_cbEng].dead || !g_cbL[g_cbEng].used || cur < 0 || cur > 10.0f * 10.0f)) {
-            if (g_cbL[g_cbEng].used && !g_cbL[g_cbEng].dead) cb_ai(CB_GSLOT + g_cbEng, 0);
-            g_cbEng = -1; cb_send_engage(); }
-        if (g_cbEng < 0 && best >= 0) { g_cbEng = best; cb_ai(CB_GSLOT + best, 1); g_cbEngages++; }
-        if (g_cbEng >= 0) cb_send_engage();
-    }
     /* apply to one matched local enemy per frame */
     static int rr; for (int t = 0; t < CB_MAX; t++) {
         int l = (rr + t) % CB_MAX; CbLocal *L = &g_cbL[l]; if (!L->used || L->match < 0 || !g_cbR[L->match].valid) continue;
@@ -231,7 +181,6 @@ static void cb_guest_tick(uint32_t now) {
         if (now - L->moveTick > 500) {
             L->moveTick = now; int x = 0, y = 0;
             if (cb_slot_pos(slot, 0, &x) && cb_slot_pos(slot, 1, &y)) {
-                L->x = x; L->y = y; if (l == g_cbEng) { int zz = 0; if (cb_slot_pos(slot, 2, &zz)) L->z = zz; break; }         /* it fights the guest: its own AI moves it */
                 float dx = (R->x - x) / 1000.0f, dy = (R->y - y) / 1000.0f, d2 = dx * dx + dy * dy;
                 if (d2 > 10.0f * 10.0f) cb_move(slot, R->x / 1000.0f, R->y / 1000.0f, R->z / 1000.0f, 0, 1);
                 else if (d2 > 1.5f * 1.5f) cb_move(slot, R->x / 1000.0f, R->y / 1000.0f, R->z / 1000.0f, d2 > 4.0f * 4.0f, 0);
@@ -270,7 +219,5 @@ static void cb_status(char *out) {
     s_cat(out, "],\"snaps\":"); u2s(a, g_cbSnaps); s_cat(out, a); s_cat(out, ",\"snapsIn\":"); u2s(a, g_cbSnapsIn); s_cat(out, a);
     s_cat(out, ",\"dmgSent\":"); u2s(a, g_cbDmgSent); s_cat(out, a); s_cat(out, ",\"dmgApplied\":"); u2s(a, g_cbDmgApplied); s_cat(out, a);
     s_cat(out, ",\"kills\":"); u2s(a, g_cbKills); s_cat(out, a); s_cat(out, ",\"sets\":"); u2s(a, g_cbSets); s_cat(out, a);
-    s_cat(out, ",\"moves\":"); u2s(a, g_cbMoves); s_cat(out, a); s_cat(out, ",\"freezes\":"); u2s(a, g_cbFreezes); s_cat(out, a);
-    s_cat(out, ",\"engaged\":"); i2s(a, g_cbEng); s_cat(out, a); s_cat(out, ",\"guestEngaged\":"); i2s(a, g_cbGEng); s_cat(out, a);
-    s_cat(out, ",\"engSent\":"); u2s(a, g_cbEngSent); s_cat(out, a); s_cat(out, ",\"engIn\":"); u2s(a, g_cbEngIn); s_cat(out, a); s_cat(out, ",\"engages\":"); u2s(a, g_cbEngages); s_cat(out, a); s_cat(out, "}");
+    s_cat(out, ",\"moves\":"); u2s(a, g_cbMoves); s_cat(out, a); s_cat(out, ",\"freezes\":"); u2s(a, g_cbFreezes); s_cat(out, a); s_cat(out, "}");
 }
