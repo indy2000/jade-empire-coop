@@ -66,6 +66,11 @@ if r:
         return h if h["onPuppet"] and len(h["onPuppet"]) < len(alive) else None
     sp = wait(split, 10); A(); h = st()["combat"]
     chk("A: the enemies split between A's player and B's puppet", sp is not None, {"onPuppet": h["onPuppet"], "host": h["host"], "pupOid": h["pupOid"]})
+    # owner: on A both enemies once went for the puppet: only the puppet's enemies may target it
+    def exact():
+        A(); h = st()["combat"]; return h if h["onPuppet"] and sorted(h["onPuppetNow"]) == sorted(h["onPuppet"]) else None
+    ex = wait(exact, 10); A(); h = st()["combat"]
+    chk("A: exactly the puppet's enemies target the puppet", ex is not None, {"assigned": h["onPuppet"], "targeting now": h["onPuppetNow"]})
     # no refill: SetHealth on the player confuses the heal-back (it saw 100 < expected 120 and healed every
     # 300 ms without GetHealth moving). Start from B's health as it is.
     B()
