@@ -1,9 +1,14 @@
-﻿JADE EMPIRE CO-OP 0.9.1 (versão de teste)
-=========================================
+﻿JADE EMPIRE CO-OP 0.10.0 (versão de teste)
+==========================================
 
 O que esta versão faz: dois jogadores, cada um no seu PC, veem o personagem do outro
-andando no mundo. Ainda NÃO tem combate, história ou troca de área sincronizados.
-É um teste da conexão pela Steam.
+andando no mundo, entram pelo save do host e trocam de área juntos.
+NOVO: combate (primeira versão). Os inimigos são controlados pelo jogo do host:
+- a vida dos inimigos e as mortes aparecem nos dois jogos;
+- os golpes de quem entrou tiram vida do inimigo no jogo do host.
+Ainda NÃO tem: inimigos atacando quem entrou (no jogo de quem entrou eles ficam
+parados), animações de ataque do outro jogador, história sincronizada.
+No jogo de quem entrou, a companheira (ex.: Dawn Star) fica fora da luta.
 
 Precisa de:
 - Jade Empire: Special Edition da Steam (a versão comprada na Steam).
