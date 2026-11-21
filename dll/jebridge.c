@@ -68,6 +68,11 @@ __declspec(dllimport) short WINAPI GetAsyncKeyState(int);
 __declspec(dllimport) BOOL WINAPI MessageBeep(unsigned);
 __declspec(dllimport) HMODULE WINAPI LoadLibraryA(const char*);
 __declspec(dllimport) void *WINAPI AddVectoredExceptionHandler(unsigned long, long (WINAPI *)(void *));
+__declspec(dllimport) HANDLE WINAPI OpenThread(DWORD, BOOL, DWORD);
+__declspec(dllimport) DWORD WINAPI SuspendThread(HANDLE);
+__declspec(dllimport) DWORD WINAPI ResumeThread(HANDLE);
+__declspec(dllimport) BOOL WINAPI GetThreadContext(HANDLE, void *);
+__declspec(dllimport) BOOL WINAPI SetThreadContext(HANDLE, void *);
 typedef struct { DWORD attr; DWORD t[6]; DWORD szHi, szLo, r0, r1; char name[260]; char alt[14]; } FINDDATA;
 __declspec(dllimport) HANDLE WINAPI FindFirstFileA(const char*, FINDDATA*);
 __declspec(dllimport) BOOL WINAPI FindNextFileA(HANDLE, FINDDATA*);
@@ -115,10 +120,36 @@ static uint32_t s2u(const char *s) {
 #define F_SLOTCOPY     0x00694800  /* thiscall(vm, slot, code, len): copy code into a script slot */
 static const uint32_t LOAD_CALLSITES[3] = { 0x00697872, 0x0069583C, 0x006974DE };
 #define F_RETVAL       0x006948C0  /* CVirtualMachine::GetRunScriptReturnValue(int *type, int *value) thiscall */
-typedef struct { char *p; uint32_t n; } CExoString;
+/* 0.10.0: 12 bytes in this build: the ctor (0x006534B0) writes p, n and a third field (0xFFFFFFFF or a pool id).
+   With only 8 bytes here the third write landed on whatever sat next on our stack (the saved ESI
+   in vm_run: the combat crash) or next to a static. Kept at 16 for slack. */
+typedef struct { char *p; uint32_t n; uint32_t pool; uint32_t pad; } CExoString;
 typedef void (__attribute__((thiscall)) *ctor_t)(CExoString *, const char *);
 typedef void (__attribute__((thiscall)) *dtor_t)(CExoString *);
 typedef int  (__attribute__((thiscall)) *run_t)(void *, CExoString *, uint32_t, int);
+/* 0.10.0: calls into the game go through these. Crash in combat sync (copy B): after a script ran,
+   ESI held 0xffffffff although the convention says the callee keeps EBX/ESI/EDI/EBP; the mod's code
+   used the trashed register (read 0xffffffff; earlier runs most likely wrote through it: our combat
+   flag and enemy table were zeroed between frames). Each wrapper saves and restores all four. */
+volatile int32_t g_gcDelta; volatile uint32_t g_gcDeltaFn; volatile int g_gcBad;
+static __attribute__((noinline)) uint32_t gcall(uint32_t fn, uint32_t ecx, int n, uint32_t a, uint32_t b, uint32_t c) {
+    uint32_t rc; int32_t d;
+    /* EBX keeps ESP from before the argument pushes, so a callee that pops the wrong number of
+       bytes (cdecl vs thiscall mix-up) can't shift our saved registers. d = bytes it got wrong. */
+    __asm__ volatile(
+        "pushl %%ebx\n\tpushl %%esi\n\tpushl %%edi\n\tpushl %%ebp\n\tmovl %%esp, %%ebx\n\t"
+        "cmpl $3, %[n]\n\tjb 1f\n\tpushl %[c]\n"
+        "1:\n\tcmpl $2, %[n]\n\tjb 2f\n\tpushl %[b]\n"
+        "2:\n\tcmpl $1, %[n]\n\tjb 3f\n\tpushl %[a]\n"
+        "3:\n\tmovl %[t], %%ecx\n\tcalll *%[f]\n\t"
+        "movl %%ebx, %%edx\n\tsubl %%esp, %%edx\n\tmovl %%ebx, %%esp\n\t"
+        "popl %%ebp\n\tpopl %%edi\n\tpopl %%esi\n\tpopl %%ebx\n\t"
+        : "=a"(rc), "=d"(d)
+        : [f] "m"(fn), [t] "m"(ecx), [n] "m"(n), [a] "m"(a), [b] "m"(b), [c] "m"(c)
+        : "ecx", "memory", "cc");
+    if (d) { g_gcDelta = d; g_gcDeltaFn = fn; g_gcBad++; }
+    return rc;
+}
 typedef int  (__attribute__((thiscall)) *ret_t)(void *, int *, int *);
 typedef int  (__attribute__((thiscall)) *load_t)(void *, CExoString *);
 typedef void (__attribute__((thiscall)) *copy_t)(void *, void *, const void *, uint32_t);
@@ -135,7 +166,7 @@ static MemScript *ms_find(const char *n) { for (int i = 0; i < g_msn; i++) if (n
 /* Replacement for the call to LoadScript at the patched call sites. Same contract. */
 static int __attribute__((thiscall)) hkLoadScript(void *vm, CExoString *resref) {
     MemScript *m = (resref && resref->p) ? ms_find(resref->p) : 0;
-    if (!m) return ((load_t)F_LOADSCRIPT)(vm, resref);
+    if (!m) return (int)gcall(F_LOADSCRIPT, (uint32_t)(uintptr_t)vm, 1, (uint32_t)(uintptr_t)resref, 0, 0);
     int *depth = (int *)((char *)vm + 0xC);
     if (*depth + 1 > 7) return -0x5E;           /* same as the original: too deep */
     *depth += 1;
@@ -175,7 +206,9 @@ static Req *g_q[QMAX]; static int g_qn;
 
 static void logline(const char *s) {
     char path[300]; s_cpy(path, g_dir); s_cat(path, "jebridge.log");
-    HANDLE h = CreateFileA(path, 4 /*FILE_APPEND_DATA*/, 1, 0, 4 /*OPEN_ALWAYS*/, 0x80, 0);
+    /* 0.10.0: share read+write (a reader made lines get lost), one retry */
+    HANDLE h = CreateFileA(path, 4 /*FILE_APPEND_DATA*/, 3, 0, 4 /*OPEN_ALWAYS*/, 0x80, 0);
+    if (h == (HANDLE)-1) { Sleep(5); h = CreateFileA(path, 4, 3, 0, 4, 0x80, 0); }
     if (h == (HANDLE)-1) return; DWORD w; WriteFile(h, s, (DWORD)s_len(s), &w, 0); WriteFile(h, "\r\n", 2, &w, 0); CloseHandle(h);
 }
 
@@ -192,10 +225,22 @@ static int check_game(void) {
 /* g_stage names what the bridge is doing on the main thread; a vectored handler logs access
    violations (first few only) with the faulting address and the current stage. */
 static volatile const char *g_stage = "idle";
-static volatile int g_avLogged;
+static volatile int g_avLogged, g_watchLogged;
+static volatile int g_inFrame, g_reenter;
+static uint32_t cb_watch_addr(int i);   /* combat.inc */
 static HMODULE g_self;
 static long WINAPI veh(void *ep) {
     uint32_t **pp = (uint32_t **)ep; uint32_t *rec = pp[0]; uint32_t *ctx = pp[1];
+    if (rec[0] == 0x80000004 && (ctx[0x14 / 4] & 3)) {        /* 0.10.0 debug: hardware write watch hit */
+        if (g_watchLogged < 80) { g_watchLogged++;
+            char m[200], a[16]; s_cpy(m, "WATCH: write to "); s_cat(m, (ctx[0x14 / 4] & 1) ? "g_cbInFight" : "g_cbH[0].used");
+            s_cat(m, " by eip "); h2s(a, rec[3]); s_cat(m, a); s_cat(m, " (dll base "); h2s(a, (uint32_t)(uintptr_t)g_self); s_cat(m, a);
+            s_cat(m, ") value "); { uint32_t wa = cb_watch_addr((ctx[0x14 / 4] & 1) ? 0 : 1); h2s(a, *(volatile uint32_t *)(uintptr_t)wa); } s_cat(m, a);
+            s_cat(m, " esp "); h2s(a, ctx[0xC4 / 4]); s_cat(m, a);
+            s_cat(m, " ret? "); h2s(a, mem_readable(ctx[0xC4 / 4], 4) ? *(uint32_t *)(uintptr_t)ctx[0xC4 / 4] : 0); s_cat(m, a);
+            s_cat(m, " stage "); s_cat(m, (const char *)g_stage); logline(m); }
+        ctx[0x14 / 4] = 0; return -1;                          /* EXCEPTION_CONTINUE_EXECUTION */
+    }
     if (rec[0] != 0xC0000005 || g_avLogged >= 5) return 0;   /* EXCEPTION_CONTINUE_SEARCH */
     g_avLogged++;
     char m[200], a[16];
@@ -205,6 +250,12 @@ static long WINAPI veh(void *ep) {
     s_cat(m, " esp "); h2s(a, ctx[0xC4 / 4]); s_cat(m, a);
     s_cat(m, " stage "); s_cat(m, (const char *)g_stage);
     logline(m);
+    { static const char *rn[] = {"edi","esi","ebx","edx","ecx","eax","ebp"}; char r[400]; s_cpy(r, "  regs");
+      for (int i = 0; i < 7; i++) { s_cat(r, " "); s_cat(r, rn[i]); s_cat(r, "="); h2s(a, ctx[0x9C / 4 + i]); s_cat(r, a); }
+      s_cat(r, " reenter="); u2s(a, (uint32_t)g_reenter); s_cat(r, a); logline(r);
+      uint32_t sp = ctx[0xC4 / 4]; s_cpy(r, "  stack");
+      for (int i = 0; i < 16 && mem_readable(sp + i * 4, 4); i++) { s_cat(r, " "); h2s(a, *(uint32_t *)(uintptr_t)(sp + i * 4)); s_cat(r, a); }
+      logline(r); }
     return 0;
 }
 
@@ -252,12 +303,11 @@ static void run_on_main(Req *r) {
         /* RE helper: the player creature as GetPlayer finds it (app+0xA0 -> FUN_00424700) and, by its id,
            the object GetFacing uses (FUN_004610b0) and the vector GetFacing reads (FUN_00412410). */
         int *app = *G_APP; void *srv = app ? *(void **)((char *)app + 0xA0) : 0;
-        uint32_t pc = srv ? (uint32_t)(uintptr_t)((getpc_t)0x00424700)(srv) : 0, id = 0, obj = 0, vec = 0;
+        uint32_t pc = srv ? gcall(0x00424700, (uint32_t)(uintptr_t)srv, 0, 0, 0, 0) : 0, id = 0, obj = 0, vec = 0;
         if (pc && mem_readable(pc, 12)) {
             id = *(uint32_t *)(uintptr_t)(pc + 8);
-            typedef char (__attribute__((thiscall)) *byid_t)(void *, uint32_t *, uint32_t *);
-            uint32_t idc = id, o = 0; char ok = ((byid_t)0x004610b0)(srv, &idc, &o);
-            if (ok == *(char *)0x006e8470 && o) { obj = o; typedef float *(__attribute__((thiscall)) *vec_t)(void *); vec = (uint32_t)(uintptr_t)((vec_t)0x00412410)((void *)(uintptr_t)o); }
+            uint32_t idc = id, o = 0; char ok = (char)gcall(0x004610b0, (uint32_t)(uintptr_t)srv, 2, (uint32_t)(uintptr_t)&idc, (uint32_t)(uintptr_t)&o, 0);
+            if (ok == *(char *)0x006e8470 && o) { obj = o; vec = gcall(0x00412410, o, 0, 0, 0, 0); }
         }
         char a1[12]; s_cpy(r->out, "{\"result\":{\"creature\":"); u2s(a1, pc); s_cat(r->out, a1);
         s_cat(r->out, ",\"id\":"); u2s(a1, id); s_cat(r->out, a1); s_cat(r->out, ",\"obj\":"); u2s(a1, obj); s_cat(r->out, a1);
@@ -267,7 +317,7 @@ static void run_on_main(Req *r) {
         /* TEST HOOK (test copies): turn the local player by writing its orientation vector (creature+0x50),
            oid = cos*10000 + 20000, value = sin*10000 + 20000. Scripts cannot turn the player (SetFacing). */
         int *app = *G_APP; void *srv = app ? *(void **)((char *)app + 0xA0) : 0;
-        uintptr_t pc = srv ? (uintptr_t)((getpc_t)0x00424700)(srv) : 0;
+        uintptr_t pc = srv ? gcall(0x00424700, (uint32_t)(uintptr_t)srv, 0, 0, 0, 0) : 0;
         if (!pc || !r->hasIval || !mem_readable(pc + 0x50, 8)) { s_cpy(r->out, "{\"error\":{\"code\":-32004,\"message\":\"no player\"}}"); return; }
         *(float *)(pc + 0x50) = ((int)r->oid - 20000) / 10000.0f; *(float *)(pc + 0x54) = (r->ival - 20000) / 10000.0f;
         s_cpy(r->out, "{\"result\":{\"ok\":true}}"); return;
@@ -318,11 +368,11 @@ static void run_on_main(Req *r) {
         void *vm = *(void **)((char *)app + APP_VM);
         if (!vm) { s_cpy(r->out, "{\"error\":{\"code\":-32010,\"message\":\"script VM not ready\"}}"); return; }
         CExoString s; s.p = 0; s.n = 0;
-        ((ctor_t)F_EXOSTR_CTOR)(&s, r->resref);
-        int rc = ((run_t)F_RUNSCRIPT)(vm, &s, r->oid, 1);
-        ((dtor_t)F_EXOSTR_DTOR)(&s);
+        gcall(F_EXOSTR_CTOR, (uint32_t)(uintptr_t)&s, 1, (uint32_t)(uintptr_t)r->resref, 0, 0);
+        int rc = (int)gcall(F_RUNSCRIPT, (uint32_t)(uintptr_t)vm, 3, (uint32_t)(uintptr_t)&s, r->oid, 1);
+        gcall(F_EXOSTR_DTOR, (uint32_t)(uintptr_t)&s, 0, 0, 0, 0);
         if (s_eq(r->method, "je.evalScript")) {
-            int typ = 0, val = 0, got = rc == 1 ? ((ret_t)F_RETVAL)(vm, &typ, &val) : 0;
+            int typ = 0, val = 0, got = rc == 1 ? (int)gcall(F_RETVAL, (uint32_t)(uintptr_t)vm, 2, (uint32_t)(uintptr_t)&typ, (uint32_t)(uintptr_t)&val, 0) : 0;
             if (!got || typ != 3) {
                 s_cpy(r->out, "{\"error\":{\"code\":-32011,\"message\":\"script did not return an int\",\"data\":{\"rc\":"); i2s(a, rc); s_cat(r->out, a);
                 s_cat(r->out, ",\"type\":"); i2s(a, typ); s_cat(r->out, a); s_cat(r->out, "}}}"); return;
@@ -352,14 +402,16 @@ static void pump(void) {
     }
 }
 
+
 static BOOL WINAPI hkPeek(MSG_ *m, void *h, unsigned a, unsigned b, unsigned f) {
     if (!g_mainTid) g_mainTid = GetCurrentThreadId();
     if (GetCurrentThreadId() == g_mainTid) {
         uint32_t t = GetTickCount();
         if (t != g_lastFrameTick) { g_frames++; g_lastFrameTick = t; }
         if (g_keepActive) *G_APPACTIVE = 1;
-        pump();
-        net_tick();
+        /* 0.10.0: if the game pumps messages while one of our scripts runs, don't re-enter */
+        if (g_inFrame) g_reenter++;
+        else { g_inFrame = 1; pump(); net_tick(); g_inFrame = 0; }
     }
     return g_realPeek(m, h, a, b, f);
 }
@@ -430,7 +482,18 @@ static void handle_line(SOCKET s, char *line) {
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
-        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.evalMany\"]}}"); return;
+        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.watch\",\"je.evalMany\"]}}"); return;
+    }
+    if (s_eq(method, "je.watch")) {   /* bridge thread: the main thread is suspended while its DR0/DR1 are set */
+        /* DEBUG: hardware write watch on the combat flag/table from the bridge thread */
+        HANDLE t = OpenThread(0x1A /* GET|SET_CONTEXT|SUSPEND_RESUME */, 0, g_mainTid);
+        if (!t) { reply(s, idtok, "{\"error\":{\"code\":-32004,\"message\":\"OpenThread failed\"}}"); return; }
+        static uint32_t ctx[256]; SuspendThread(t); ctx[0] = 0x10010; /* CONTEXT_DEBUG_REGISTERS */
+        int ok = GetThreadContext(t, ctx);
+        if (ok) { ctx[1] = cb_watch_addr(0); ctx[2] = cb_watch_addr(1); ctx[5] = 0; ctx[6] = 0x00DD0005;   /* L0 L1; RW0=01 LEN0=11 RW1=01 LEN1=11: write, 4 bytes */ ok = SetThreadContext(t, ctx); }
+        ResumeThread(t); CloseHandle(t);
+        char out[160]; s_cpy(out, "{\"result\":{\"ok\":"); s_cat(out, ok ? "true" : "false"); s_cat(out, ",\"dr0\":\""); h2s(a, cb_watch_addr(0)); s_cat(out, a);
+        s_cat(out, "\",\"dr1\":\""); h2s(a, cb_watch_addr(1)); s_cat(out, a); s_cat(out, "\"}}"); reply(s, idtok, out); return;
     }
     if (!g_hooked) { reply(s, idtok, "{\"error\":{\"code\":-32010,\"message\":\"frame hook not installed\"}}"); return; }
     Req r; memset(&r, 0, sizeof r);

@@ -29,3 +29,8 @@ MoveFileA@8
 CreateDirectoryA@8
 AddVectoredExceptionHandler@8
 VirtualQuery@12
+OpenThread@12
+SuspendThread@4
+ResumeThread@4
+GetThreadContext@8
+SetThreadContext@8

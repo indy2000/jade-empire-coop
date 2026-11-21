@@ -28,6 +28,7 @@ static CbHost g_cbH[CB_MAX]; static CbLocal g_cbL[CB_MAX]; static CbRemote g_cbR
 static int g_cbInFight, g_cbEnumC, g_cbRead, g_cbNH, g_cbNL, g_cbHenchDone;
 static uint32_t g_cbSnapTick, g_cbEnumTick, g_cbSnaps, g_cbSnapsIn, g_cbDmgSent, g_cbDmgApplied, g_cbKills, g_cbSets, g_cbMoves, g_cbFreezes;
 
+static uint32_t cb_watch_addr(int i) { return i ? (uint32_t)(uintptr_t)&g_cbH[0].used : (uint32_t)(uintptr_t)&g_cbInFight; }
 static void n_push_slot(Ncs *s, int slot) { n_consti(s, slot); n_action(s, R_GETPLAYER, 0); n_action(s, R_GETLOCALOBJECT, 2); }
 static int cb_run(const char *name, Ncs *s) { n_retn(s); n_finish(s); if (ms_store(name, s->b, s->n)) return 0; return vm_run(name, 0x7F000000) == 1; }
 static int cb_eval(Ncs *s, int extra, int *out) { n_int_main_end(s, extra); if (ms_store("jbc_ev", s->b, s->n)) return 0; return vm_eval("jbc_ev", out); }
@@ -55,12 +56,16 @@ static void cb_pick(int k, int i) {
                   n_consti(&a, CB_AREA); n_action(&a, R_GETPLAYER, 0); n_action(&a, R_SETLOCALOBJECT, 3); cb_run("jbc_area", &a); }
     Ncs s; n_void_main_begin(&s); n_consti(&s, i); n_push_slot(&s, CB_AREA); n_action(&s, 881, 2);
     n_consti(&s, CB_TMP); n_action(&s, R_GETPLAYER, 0); n_action(&s, R_SETLOCALOBJECT, 3); cb_run("jbc_pick", &s); }
-static int cb_valid(int slot) { Ncs s; n_int_main_begin(&s); n_push_slot(&s, slot); n_action(&s, R_GETISOBJECTVALID, 1); int v = 0; return cb_eval(&s, 4, &v) && v; }
+/* exists: GetIsObjectValid read 0 for a live enemy (faction 1, hp 25), so also accept a faction or health */
+/* 1 exists, 0 gone, -1 could not tell (a script did not run: the VM was busy) */
+static int cb_valid(int slot) { Ncs s; n_int_main_begin(&s); n_push_slot(&s, slot); n_action(&s, R_GETISOBJECTVALID, 1); int v = 0;
+    if (!cb_eval(&s, 4, &v)) return -1; if (v) return 1;
+    int f = 0, h = 0; if (!cb_slot_int(slot, 713, &f) || !cb_slot_int(slot, 49, &h)) return -1; return f != 0 || h != 0; }
 /* index+1 of the table slot (base..base+15) holding the same object as CB_TMP, 0 if none (EQUALOO 0x0B 0x22) */
 static int cb_known(int base, int guest) {
     Ncs s; n_int_main_begin(&s); n_consti(&s, 0);
     for (int j = 0; j < CB_MAX; j++) { if (!(guest ? g_cbL[j].used : g_cbH[j].used)) continue; n_push_slot(&s, CB_TMP); n_push_slot(&s, base + j); nb(&s, 0x0B); nb(&s, 0x22); n_consti(&s, j + 1); nb(&s, 0x16); nb(&s, 0x20); nb(&s, 0x14); nb(&s, 0x20); }
-    int v = 0; return cb_eval(&s, 4, &v) ? v : 0;    /* single value on top: extra 4 */
+    int v = 0; return cb_eval(&s, 4, &v) ? v : -1;   /* single value on top: extra 4; -1 = could not tell */
 }
 static void cb_copy_tmp(int slot) { Ncs s; n_void_main_begin(&s); n_push_slot(&s, CB_TMP); n_consti(&s, slot); n_action(&s, R_GETPLAYER, 0); n_action(&s, R_SETLOCALOBJECT, 3); cb_run("jbc_cp", &s); }
 static void cb_freeze(int slot) { Ncs s; n_void_main_begin(&s); n_consti(&s, 1); n_push_slot(&s, slot); n_action(&s, 935, 2); cb_run("jbc_frz", &s); g_cbFreezes++; }
@@ -79,11 +84,11 @@ static void cb_move(int slot, float x, float y, float z, int run, int jump) {
 static void cb_enum_step(int base, int guest) {
     int c = g_cbEnumC; g_cbEnumC = (g_cbEnumC + 1) % 64;
     { int jj = c % CB_MAX; int used = guest ? g_cbL[jj].used : g_cbH[jj].used;          /* prune one table entry per step */
-      if (used && !cb_valid(base + jj)) { if (guest) { g_cbL[jj].used = 0; g_cbNL--; } else { g_cbH[jj].used = 0; g_cbNH--; } } }
+      if (used && cb_valid(base + jj) == 0) { if (guest) { g_cbL[jj].used = 0; g_cbNL--; } else { g_cbH[jj].used = 0; g_cbNH--; } } }
     cb_pick(c / 16, c % 16);
-    if (!cb_valid(CB_TMP)) return;
+    if (cb_valid(CB_TMP) != 1) return;
     int fac = 0; if (!cb_slot_int(CB_TMP, 713, &fac) || !(fac == 1 || fac == 3 || fac == 6)) return;
-    if (cb_known(base, guest)) return;
+    if (cb_known(base, guest) != 0) return;
     int j = 0; if (guest) { while (j < CB_MAX && g_cbL[j].used) j++; } else { while (j < CB_MAX && g_cbH[j].used) j++; }
     if (j >= CB_MAX) return;
     cb_copy_tmp(base + j);
@@ -176,15 +181,24 @@ static void cb_guest_tick(uint32_t now) {
     }
 }
 /* called every frame with a player present; tune 128 = off (mutation runs) */
+static int cb_used(void) { int n = 0; for (int j = 0; j < CB_MAX; j++) n += g_steamHost ? g_cbH[j].used : g_cbL[j].used; return n; }
+static void cb_log3(const char *what, int a, int b, int c2) { char m[200], t[16]; s_cpy(m, "combat: "); s_cat(m, what); s_cat(m, " ");
+    i2s(t, a); s_cat(m, t); s_cat(m, " "); i2s(t, b); s_cat(m, t); s_cat(m, " "); i2s(t, c2); s_cat(m, t); s_cat(m, " stage "); s_cat(m, g_stage ? (const char *)g_stage : "?"); logline(m); }
 static void cb_tick(void) {
     if (!g_useSteam || !g_steamOn || (g_tune & 128)) return;
     uint32_t now = GetTickCount();
+    { extern volatile int32_t g_gcDelta; extern volatile uint32_t g_gcDeltaFn; extern volatile int g_gcBad; static int seen;
+      if (g_gcBad != seen && seen < 20) { seen = g_gcBad; cb_log3("GCALL stack off: fn, bytes, count", (int)g_gcDeltaFn, g_gcDelta, g_gcBad); } }
+    if (g_cbInFight != g_cbShadow) { cb_log3("FLAG CHANGED OUTSIDE cb_tick: shadow, now, table entries", g_cbShadow, g_cbInFight, cb_used()); g_cbInFight = g_cbShadow; }
+    static int lastUsed; int u0 = cb_used(); if (lastUsed && !u0) cb_log3("table emptied before this tick: had, now, inFight", lastUsed, u0, g_cbInFight);
     static uint32_t lastCheck; if (now - lastCheck >= 500) { lastCheck = now; int f = cb_in_fight();
         if (f && !g_cbInFight) { cb_reset(); g_cbEnumTick = now; logline(g_steamHost ? "combat: fight started (host)" : "combat: fight started (guest)"); }
         if (!f && g_cbInFight) logline("combat: fight over");
-        g_cbInFight = f; }
-    if (!g_cbInFight) return;
+        g_cbInFight = f; g_cbShadow = f; }
+    lastUsed = cb_used();
+    if (!g_cbInFight) { lastUsed = cb_used(); return; }
     if (g_steamHost) cb_host_tick(now); else cb_guest_tick(now);
+    lastUsed = cb_used();
 }
 static void cb_status(char *out) {
     char a[16];

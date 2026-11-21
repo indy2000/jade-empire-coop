@@ -90,6 +90,7 @@ static int g_tune;
 static float g_rvx, g_rvy;            /* remote player velocity, m/s, from received positions */
 static int g_ordRun; static uint32_t g_runOrders, g_walkOrders;
 /* 0.8.0: look. Packet JEC2 also carries facing (centidegrees), appearance and head type. */
+static volatile int g_cbShadow;   /* 0.10.0 debug: copy of combat.inc's g_cbInFight, kept far from it */
 static int32_t g_myArea, g_rarea; static uint32_t g_areaHides, g_areaReads;
 static int16_t g_myFc, g_myFs; static int32_t g_myApp = -1, g_myHead = -1;
 static volatile int16_t g_rfc, g_rfs; static volatile int g_rfaceValid, g_rapp = -1, g_rhead = -1;
@@ -119,8 +120,9 @@ static int vm_run(const char *name, uint32_t oid) {
     /* Only from an idle VM: PeekMessageA can be reached while a script is running (nested
        message pumping); RunScript treats depth -1 at vm+0x0C as idle. */
     if (*(int *)((char *)vm + 0xC) != -1) { g_vmBusySkips++; return -2; }
-    CExoString s; s.p = 0; s.n = 0; ((ctor_t)F_EXOSTR_CTOR)(&s, name);
-    int rc = ((run_t)F_RUNSCRIPT)(vm, &s, oid, 1); ((dtor_t)F_EXOSTR_DTOR)(&s); return rc;
+    CExoString s; s.p = 0; s.n = 0; gcall(F_EXOSTR_CTOR, (uint32_t)(uintptr_t)&s, 1, (uint32_t)(uintptr_t)name, 0, 0);
+    int rc = (int)gcall(F_RUNSCRIPT, (uint32_t)(uintptr_t)vm, 3, (uint32_t)(uintptr_t)&s, oid, 1);
+    gcall(F_EXOSTR_DTOR, (uint32_t)(uintptr_t)&s, 0, 0, 0, 0); return rc;
 }
 /* Is there a player creature? NWScript GetPlayer (0x00487310) does app+0xA0 -> FUN_00424700 (thiscall,
    a lookup) and reads [result+8] WITHOUT a null check: after Esc > Quit game the player is gone and
@@ -131,7 +133,7 @@ static uint32_t g_noPlayerSkips;
 static int player_exists(void) {
     int *app = *G_APP; if (!app) return 0;
     void *srv = *(void **)((char *)app + 0xA0); if (!srv) return 0;
-    return ((getpc_t)0x00424700)(srv) != 0;
+    return gcall(0x00424700, (uint32_t)(uintptr_t)srv, 0, 0, 0, 0) != 0;
 }
 /* 0.8.1: the player's real orientation. GetFacing(GetPlayer()) stays constant for the player; the unit
    vector at creature+0x50 (creature = FUN_00424700 on app+0xA0, followed by the position at +0x5C)
@@ -140,7 +142,7 @@ static int player_exists(void) {
 static void player_dir(int16_t *c, int16_t *s) {
     *c = *s = 0;
     int *app = *G_APP; if (!app) return; void *srv = *(void **)((char *)app + 0xA0); if (!srv) return;
-    uintptr_t pc = (uintptr_t)((getpc_t)0x00424700)(srv); if (!pc || !mem_readable(pc + 0x50, 8)) return;
+    uintptr_t pc = gcall(0x00424700, (uint32_t)(uintptr_t)srv, 0, 0, 0, 0); if (!pc || !mem_readable(pc + 0x50, 8)) return;
     float x = *(float *)(pc + 0x50), y = *(float *)(pc + 0x54), l = x * x + y * y;
     if (l < 0.9f || l > 1.1f) return;
     *c = (int16_t)(x * 10000.0f); *s = (int16_t)(y * 10000.0f); if (!*c && !*s) *c = 1;
@@ -150,7 +152,7 @@ static __attribute__((noinline)) int vm_eval(const char *name, int *out) {
     void *vm = *(void **)((char *)app + APP_VM); if (!vm) return 0;
     if (vm_run(name, 0x7F000000) != 1) { g_stage = "net idle"; return 0; }
     g_stage = "GetRunScriptReturnValue";
-    int typ = 0, val = 0; if (!((ret_t)F_RETVAL)(vm, &typ, &val) || typ != 3) { g_stage = "net idle"; return 0; }
+    int typ = 0, val = 0; if (!gcall(F_RETVAL, (uint32_t)(uintptr_t)vm, 2, (uint32_t)(uintptr_t)&typ, (uint32_t)(uintptr_t)&val, 0) || typ != 3) { g_stage = "net idle"; return 0; }
     g_stage = "net idle";
     *out = val; return 1;
 }
