@@ -8,7 +8,7 @@ import json, sys, time
 import jeb, bot, ncs
 MUT = "--mutate" in sys.argv
 MUTE = "--mutate-engage" in sys.argv   # 0.11.0: host enemies never go for the puppet (tune 64)
-TUNE = 128 if MUT else 64 if MUTE else 0
+TUNE = (128 if MUT else 64 if MUTE else 0) | 256   # 256: B never lowers its minimum health (the test keeps B alive)
 G = lambda: ncs.ACTION(ncs.R["GetPlayer"], 0)
 def A(): jeb.use("test_install")
 def B(): jeb.use("test_install_b")
@@ -69,6 +69,12 @@ if r:
     e = wait(hurt, 20); A(); h = st()["combat"]; B(); g = st()["combat"]
     chk("B's player loses health when A's enemy hits B's puppet", e is not None,
         {"A pupHits": h["pupHits"], "A pupDmg": h["pupDmg"], "B hitsIn": g["hitsIn"], "B hp start": hb0, "B hp now": ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4))})
+# 0.11.0-re9: on B the enemies fight with their own AI (animations), their hits on B are healed back
+if r:
+    def localhit():
+        B(); g = st()["combat"]; return g if g["heals"] > 0 else None
+    lh = wait(localhit, 15); B(); g = st()["combat"]
+    chk("B: an enemy attacks B's player in B's own game (hit healed back)", lh is not None, {"heals": g["heals"], "healed": g["healed"]})
 # 0.10.1: after a reload B killed its new enemies (matched to the previous fight's dead ones)
 if r:
     hd = {e[0]: e[2] for e in r[0]["host"]}
