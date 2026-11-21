@@ -377,6 +377,15 @@ static void run_on_main(Req *r) {
             for (int i = 0; i < 16; i++) { s_cat(r->out, ","); u2s(a1, a->req[i]); s_cat(r->out, a1); } s_cat(r->out, "]"); }
         s_cat(r->out, "]}}"); return;
     }
+    if (s_eq(r->method, "je.animPlay")) {
+        /* re/target: FUN_00443d80(*(creature+0x358), req, 0) with a 64-byte request given as hex; oid = creature */
+        static uint32_t req[16]; uintptr_t c = r->oid;
+        if (!c || !mem_readable(c + 0x358, 4) || !r->hex || r->hexLen != 128) { s_cpy(r->out, "{\"error\":{\"code\":-32602,\"message\":\"bad creature or hex\"}}"); return; }
+        for (int i = 0; i < 64; i++) { int hi = hexval(r->hex[2*i]), lo = hexval(r->hex[2*i+1]); ((uint8_t *)req)[i] = (uint8_t)(hi * 16 + lo); }
+        uint32_t ctrl = *(uint32_t *)(c + 0x358); if (!ctrl) { s_cpy(r->out, "{\"error\":{\"code\":-32004,\"message\":\"no controller\"}}"); return; }
+        uint32_t rc = gcall(0x00443d80, ctrl, 2, (uint32_t)(uintptr_t)req, 0, 0);
+        char a1[12]; s_cpy(r->out, "{\"result\":{\"eax\":"); u2s(a1, rc); s_cat(r->out, a1); s_cat(r->out, "}}"); return;
+    }
     if (s_eq(r->method, "je.pin")) {
         /* TEST HOOK (re/target, test copies only): write a dword every frame. oid = address (0 = clear all),
            value = dword. Up to 4 pins. */
@@ -551,11 +560,11 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.11.0-re7\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.11.0-re8\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
-        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.watch\",\"je.evalMany\",\"je.creature\",\"je.pin\",\"je.call\",\"je.watchStats\",\"je.animLog\"]}}"); return;
+        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.watch\",\"je.evalMany\",\"je.creature\",\"je.pin\",\"je.call\",\"je.watchStats\",\"je.animLog\",\"je.animPlay\"]}}"); return;
     }
     if (s_eq(method, "je.watchStats")) {   /* re/target: writer eips seen by the watch and how often */
         char out[900]; s_cpy(out, "{\"result\":{\"writers\":[");

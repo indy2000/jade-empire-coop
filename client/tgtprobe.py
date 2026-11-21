@@ -19,10 +19,11 @@ def objid(push):
     v = ev("jx_oid", int_main(b, 12)); return None if v is None else v & 0xffffffff
 def creature(oid): r = jeb.call("je.creature", {"oid": oid}); return r.get("result", {}).get("creature")
 def peek(addr, n): r = jeb.call("je.peek", {"oid": addr, "value": n}); return bytes.fromhex(r["result"]["hex"]) if "result" in r else None
-jeb.use("test_install"); bot.setup()
+import os
+jeb.use(os.environ.get("JEB_INSTALL", "test_install")); bot.setup()
 pl = jeb.call("je.playerPtr")["result"]
 ids = {"player": objid(G()), "puppet": objid(slot_push(192))}
-for j in range(4): ids["enemy%d" % j] = objid(slot_push(220 + j))
+for j in range(4): ids["enemy%d" % j] = objid(slot_push(int(os.environ.get("ESLOT", "220")) + j))
 cr = {k: (creature(v) if v else None) for k, v in ids.items()}
 def name(i): return next((k for k, v in ids.items() if v == i), hex(i))
 def tgt(c):
@@ -69,7 +70,7 @@ if mode == "pin588":
     print("puppet +0x588 was", hex(int.from_bytes(peek(cr["puppet"] + 0x588, 4), "little")))
     print(jeb.call("je.pin", {"oid": cr["puppet"] + 0x588, "value": 1}))
 if mode == "anim":   # log every animation request of in-combat creatures for N s (re7 hook on FUN_00443d80)
-    cname = {v: k for k, v in cr.items() if v}
+    cname = {v: k for k, v in cr.items() if v}; print("creatures", {k: hex(v) for k, v in cr.items() if v})
     print(jeb.call("je.animLog", {"value": 1})); t0 = time.time(); seen = 0; rows = []
     while time.time() - t0 < float(sys.argv[2]):
         time.sleep(0.5); r = jeb.call("je.animLog", {"oid": 12})["result"]; n = r["n"]
@@ -78,3 +79,10 @@ if mode == "anim":   # log every animation request of in-combat creatures for N 
             rows.append(x); print(x[0] % 100000, cname.get(x[1], hex(x[1])), "flag", x[2], "req", [hex(v) if v > 0xffff else v for v in x[3:]], flush=True)
         seen = n
     print(jeb.call("je.animLog", {"value": 0}), "total", seen)
+if mode == "animplay":   # play a request on enemy J of this copy: animplay J v0 v1 ... (16 ints; missing = 0; f:x = float)
+    import struct
+    j = int(sys.argv[2]); vals = []
+    for t in sys.argv[3:]:
+        vals.append(struct.unpack("<I", struct.pack("<f", float(t[2:])))[0] if t.startswith("f:") else int(t, 0) & 0xffffffff)
+    vals += [0] * (16 - len(vals)); hx = b"".join(struct.pack("<I", v) for v in vals[:16]).hex()
+    print(jeb.call("je.animPlay", {"oid": cr["enemy%d" % j], "hex": hx}))
