@@ -68,3 +68,13 @@ if mode == "gates":   # the checks FUN_004bc760(enemy, target) makes, for target
 if mode == "pin588":
     print("puppet +0x588 was", hex(int.from_bytes(peek(cr["puppet"] + 0x588, 4), "little")))
     print(jeb.call("je.pin", {"oid": cr["puppet"] + 0x588, "value": 1}))
+if mode == "anim":   # log every animation request of in-combat creatures for N s (re7 hook on FUN_00443d80)
+    cname = {v: k for k, v in cr.items() if v}
+    print(jeb.call("je.animLog", {"value": 1})); t0 = time.time(); seen = 0; rows = []
+    while time.time() - t0 < float(sys.argv[2]):
+        time.sleep(0.5); r = jeb.call("je.animLog", {"oid": 12})["result"]; n = r["n"]
+        new = r["recs"][-(n - seen):] if n - seen < len(r["recs"]) else r["recs"]
+        for x in new:
+            rows.append(x); print(x[0] % 100000, cname.get(x[1], hex(x[1])), "flag", x[2], "req", [hex(v) if v > 0xffff else v for v in x[3:]], flush=True)
+        seen = n
+    print(jeb.call("je.animLog", {"value": 0}), "total", seen)

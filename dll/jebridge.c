@@ -154,6 +154,30 @@ typedef int  (__attribute__((thiscall)) *ret_t)(void *, int *, int *);
 typedef int  (__attribute__((thiscall)) *load_t)(void *, CExoString *);
 typedef void (__attribute__((thiscall)) *copy_t)(void *, void *, const void *, uint32_t);
 
+/* ---------------- re/target: animation request log ----------------
+   FUN_00443d80(ctrl, req[16 dwords], flag) is the engine's "play this animation" entry (PlayCombatAnimation
+   #940 and ~25 game callers use it); ctrl[0] = creature. RE build only: a 6-byte entry patch logs every
+   request of creatures that are in combat (+0x588 != 0) into a ring the client reads with je.animLog. */
+typedef struct { uint32_t tick, creature, req[16], flag; } AnimRec;
+static AnimRec g_anim[128]; static volatile uint32_t g_animN; static int g_animOn;
+__attribute__((used)) uint32_t g_ret443 = 0x00443d86;
+__attribute__((used)) void __cdecl anim_log(uint32_t ctrl, uint32_t req, uint32_t flag) {
+    if (!g_animOn || !ctrl || !req) return; uint32_t c = *(uint32_t *)(uintptr_t)ctrl;
+    if (!c || !*(uint32_t *)(uintptr_t)(c + 0x588)) return;
+    AnimRec *a = &g_anim[g_animN % 128]; a->tick = GetTickCount(); a->creature = c; a->flag = flag;
+    for (int i = 0; i < 16; i++) a->req[i] = ((uint32_t *)(uintptr_t)req)[i]; g_animN++;
+}
+__asm__(".text\n.globl _hk443d80\n_hk443d80:\n"
+        "pushal\n\tpushl 40(%esp)\n\tpushl 40(%esp)\n\tpushl %ecx\n\tcall _anim_log\n\taddl $12, %esp\n\tpopal\n\t"
+        "pushl %ebx\n\tpushl %ebp\n\tmovl %ecx, %ebx\n\tmovl (%ebx), %eax\n\tjmp *_g_ret443\n");
+extern void hk443d80(void);
+static int anim_hook(void) {
+    uint8_t *p = (uint8_t *)0x00443d80; static const uint8_t want[6] = { 0x53, 0x55, 0x8b, 0xd9, 0x8b, 0x03 };
+    for (int i = 0; i < 6; i++) if (p[i] != want[i]) return 0;
+    DWORD old; VirtualProtect(p, 6, 0x40, &old); p[0] = 0xE9; *(int32_t *)(p + 1) = (int32_t)((uint32_t)(uintptr_t)hk443d80 - (0x00443d80 + 5)); p[5] = 0x90;
+    VirtualProtect(p, 6, old, &old); return 1;
+}
+
 /* ---------------- in-memory scripts ---------------- */
 #define MS_MAX 128   /* 0.8.0: was 32; long test sessions filled it ("script table full") */
 #define MS_POOL 262144
@@ -342,6 +366,17 @@ static void run_on_main(Req *r) {
         uint32_t rc = gcall(fn, r->cf[1], (int)r->cf[2], r->cf[3], r->cf[4], 0);
         char a1[12]; s_cpy(r->out, "{\"result\":{\"eax\":"); u2s(a1, rc); s_cat(r->out, a1); s_cat(r->out, "}}"); return;
     }
+    if (s_eq(r->method, "je.animLog")) {
+        /* re/target: value 1 = hook + start, 0 = stop; returns the newest records (oid = how many, max 12) */
+        if (r->hasIval) { static int hooked; if (!hooked) hooked = anim_hook(); g_animOn = r->ival && hooked; if (r->ival) g_animN = 0;
+            s_cpy(r->out, g_animOn ? "{\"result\":{\"on\":true}}" : "{\"result\":{\"on\":false}}"); return; }
+        uint32_t want = r->oid == 0x7F000000 ? 12 : r->oid; if (want > 12) want = 12; uint32_t n = g_animN, k0 = n > want ? n - want : 0;
+        char a1[12]; s_cpy(r->out, "{\"result\":{\"n\":"); u2s(a1, n); s_cat(r->out, a1); s_cat(r->out, ",\"recs\":[");
+        for (uint32_t k = k0; k < n; k++) { AnimRec *a = &g_anim[k % 128]; if (k > k0) s_cat(r->out, ",");
+            s_cat(r->out, "["); u2s(a1, a->tick); s_cat(r->out, a1); s_cat(r->out, ","); u2s(a1, a->creature); s_cat(r->out, a1); s_cat(r->out, ","); u2s(a1, a->flag); s_cat(r->out, a1);
+            for (int i = 0; i < 16; i++) { s_cat(r->out, ","); u2s(a1, a->req[i]); s_cat(r->out, a1); } s_cat(r->out, "]"); }
+        s_cat(r->out, "]}}"); return;
+    }
     if (s_eq(r->method, "je.pin")) {
         /* TEST HOOK (re/target, test copies only): write a dword every frame. oid = address (0 = clear all),
            value = dword. Up to 4 pins. */
@@ -516,11 +551,11 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.11.0-re6\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.11.0-re7\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
-        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.watch\",\"je.evalMany\",\"je.creature\",\"je.pin\",\"je.call\",\"je.watchStats\"]}}"); return;
+        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.watch\",\"je.evalMany\",\"je.creature\",\"je.pin\",\"je.call\",\"je.watchStats\",\"je.animLog\"]}}"); return;
     }
     if (s_eq(method, "je.watchStats")) {   /* re/target: writer eips seen by the watch and how often */
         char out[900]; s_cpy(out, "{\"result\":{\"writers\":[");
