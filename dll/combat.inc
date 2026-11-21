@@ -36,7 +36,7 @@ static uint8_t g_cbFightId, g_cbRid; static uint32_t g_cbRtick;
    the puppet's id into +0x5a4 every frame for the puppet's enemies, measures the puppet's health and
    sends what it lost to the guest ('JEPH'), who takes it off its own player. */
 #define CB_ID_INVALID (*(volatile uint32_t *)0x0075B394)
-static uint32_t g_cbMyOid; static int g_cbMyHp = -1, g_cbHealReset; static uint32_t g_cbHeals, g_cbHealed;
+static uint32_t g_cbMyOid, g_cbHitTick; static int g_cbMyHp = -1, g_cbHealReset; static uint32_t g_cbHeals, g_cbHealed;
 static uint32_t g_cbPupOid, g_cbPupTick, g_cbAssignTick, g_cbPupHits, g_cbPupDmg, g_cbHitsIn; static int g_cbPupHp = -1, g_cbPupMax;
 static uint32_t g_cbSnapTick, g_cbEnumTick, g_cbSnaps, g_cbSnapsIn, g_cbDmgSent, g_cbDmgApplied, g_cbKills, g_cbSets, g_cbMoves, g_cbFreezes;
 
@@ -182,7 +182,10 @@ static void cb_on_hits(const uint8_t *p, int n) {
     /* EffectDamageHealth (#771), instant: SetHealth on the player changed what GetHealth reads but not the
        health bar, and the player did not die at 0 (owner, copy B); the damage effect moves the bar. */
     Ncs b; n_void_main_begin(&b); n_constf(&b, 0.0f); n_consti(&b, d); n_action(&b, 771, 1); n_consti(&b, 0); n_action(&b, R_GETPLAYER, 0); n_action(&b, R_APPLYEFFECT, 4); cb_run("jbc_ph", &b);
-    g_cbHitsIn++; g_cbMyHp = cb_my_hp();
+    /* the effect shows in GetHealth a little later: reading it right away gave the old value, and the
+       heal-back then undid the host's hit (seen: B 70 with 57 host damage). Expect before - d instead,
+       and don't judge for 600 ms */
+    g_cbHitsIn++; if (before >= 0) { g_cbMyHp = before - d; if (g_cbMyHp < 1) g_cbMyHp = 1; } else g_cbMyHp = -1; g_cbHitTick = GetTickCount();
 }
 /* guest: our enemies fight locally (animations), but only the host's hits count: local hits are healed
    back (EffectModifyHealth #746, instant), and a minimum health of 1 keeps a local hit from killing us */
@@ -192,7 +195,7 @@ static void cb_guest_heal(void) {
     /* 0.11.0: one heal, then 300 ms before looking again: in one run 790 heals of exactly 20 were counted
        for a few hits, so the heal seemed to show up in GetHealth only a while later (unknown) */
     if (g_cbHealReset) { g_cbHealReset = 0; g_cbHealLogs = 0; }
-    uint32_t now = GetTickCount(); if (now - g_cbHealTick < 300) return;
+    uint32_t now = GetTickCount(); if (now - g_cbHealTick < 300 || now - g_cbHitTick < 600) return;
     int hp = cb_my_hp(); if (hp < 0) return;
     if (hp < g_cbMyHp && g_cbHealLogs < 30) { g_cbHealLogs++; cb_log3("heal back: hp read, expected, ms since last heal", hp, g_cbMyHp, (int)(now - g_cbHealTick)); }
     if (g_cbMyHp < 0) { g_cbMyHp = hp; cb_my_minhp(1); return; }

@@ -62,13 +62,20 @@ if r:
     chk("A: the enemies split between A's player and B's puppet", sp is not None, {"onPuppet": h["onPuppet"], "host": h["host"], "pupOid": h["pupOid"]})
     # GetMaxHealth(player) read 0 on B once, so "refill" sets a fixed 100 (script view of health)
     B(); bot.load("jx_rf", ncs.void_main(ncs.CONSTI(100) + G() + ncs.ACTION(156, 2))); bot.run("jx_rf")
-    hb0 = ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4))
+    hb0 = ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4)); A(); dmg0 = st()["combat"]["pupDmg"]
     def hurt():
         B(); g = st()["combat"]; hb = ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4))
         return (g, hb) if g["hitsIn"] > 0 and hb < hb0 else None
     e = wait(hurt, 20); A(); h = st()["combat"]; B(); g = st()["combat"]
     chk("B's player loses health when A's enemy hits B's puppet", e is not None,
         {"A pupHits": h["pupHits"], "A pupDmg": h["pupDmg"], "B hitsIn": g["hitsIn"], "B hp start": hb0, "B hp now": ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4))})
+# 0.11.0: B's health is what it was minus the host's hits since then (the heal-back once undid a host hit)
+if r:
+    def settled():
+        A(); d1 = st()["combat"]["pupDmg"]; time.sleep(1.5); B(); hb = ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4)); A(); d2 = st()["combat"]["pupDmg"]
+        return (hb, d1) if d1 == d2 else None
+    se = wait(settled, 20); want = max(1, hb0 - (se[1] - dmg0)) if se else None
+    chk("B's health = start - host damage (no host hit healed back)", bool(se) and se[0] == want, {"B hp": se and se[0], "expected": want, "host damage since start": se and se[1] - dmg0})
 # 0.11.0-re9: on B the enemies fight with their own AI (animations), their hits on B are healed back
 if r:
     def localhit():
