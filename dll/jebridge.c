@@ -154,6 +154,7 @@ typedef int  (__attribute__((thiscall)) *ret_t)(void *, int *, int *);
 typedef int  (__attribute__((thiscall)) *load_t)(void *, CExoString *);
 typedef void (__attribute__((thiscall)) *copy_t)(void *, void *, const void *, uint32_t);
 
+#ifdef JE_RE
 /* ---------------- re/target: animation request log ----------------
    FUN_00443d80(ctrl, req[16 dwords], flag) is the engine's "play this animation" entry (PlayCombatAnimation
    #940 and ~25 game callers use it); ctrl[0] = creature. RE build only: a 6-byte entry patch logs every
@@ -178,6 +179,7 @@ static int anim_hook(void) {
     VirtualProtect(p, 6, old, &old); return 1;
 }
 
+#endif
 /* ---------------- in-memory scripts ---------------- */
 #define MS_MAX 128   /* 0.8.0: was 32; long test sessions filled it ("script table full") */
 #define MS_POOL 262144
@@ -352,6 +354,7 @@ static void run_on_main(Req *r) {
         s_cat(r->out, ",\"id\":"); u2s(a1, id); s_cat(r->out, a1); s_cat(r->out, ",\"obj\":"); u2s(a1, obj); s_cat(r->out, a1);
         s_cat(r->out, ",\"vec\":"); u2s(a1, vec); s_cat(r->out, a1); s_cat(r->out, "}}"); return;
     }
+#ifdef JE_RE
     if (s_eq(r->method, "je.creature")) {
         /* RE helper (re/target): creature pointer for an object id (FUN_004611b0, thiscall on app+0xA0) */
         int *app = *G_APP; void *srv = app ? *(void **)((char *)app + 0xA0) : 0; uint32_t id = r->oid;
@@ -395,6 +398,7 @@ static void run_on_main(Req *r) {
         *(volatile uint32_t *)(uintptr_t)r->oid = (uint32_t)r->ival;
         char a1[12]; s_cpy(r->out, "{\"result\":{\"pins\":"); u2s(a1, (uint32_t)g_npin); s_cat(r->out, a1); s_cat(r->out, "}}"); return;
     }
+#endif
     if (s_eq(r->method, "je.testSetDir")) {
         /* TEST HOOK (test copies): turn the local player by writing its orientation vector (creature+0x50),
            oid = cos*10000 + 20000, value = sin*10000 + 20000. Scripts cannot turn the player (SetFacing). */
@@ -560,17 +564,19 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.11.0-re9\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.11.0\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
         reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.watch\",\"je.evalMany\",\"je.creature\",\"je.pin\",\"je.call\",\"je.watchStats\",\"je.animLog\",\"je.animPlay\"]}}"); return;
     }
+#ifdef JE_RE
     if (s_eq(method, "je.watchStats")) {   /* re/target: writer eips seen by the watch and how often */
         char out[900]; s_cpy(out, "{\"result\":{\"writers\":[");
         for (int k = 0; k < g_wseen; k++) { if (k) s_cat(out, ","); s_cat(out, "[\""); h2s(a, g_wsEip[k]); s_cat(out, a); s_cat(out, "\","); u2s(a, g_wsCnt[k]); s_cat(out, a); s_cat(out, "]"); }
         s_cat(out, "]}}"); reply(s, idtok, out); return;
     }
+#endif
     if (s_eq(method, "je.watch")) {   /* bridge thread: the main thread is suspended while its DR0/DR1 are set */
         /* DEBUG: hardware write watch on the combat flag/table from the bridge thread */
         HANDLE t = OpenThread(0x1A /* GET|SET_CONTEXT|SUSPEND_RESUME */, 0, g_mainTid);
