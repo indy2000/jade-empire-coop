@@ -249,6 +249,7 @@ static void net_set_facing(float px, float py, float pz) {
 static int32_t facedot(void) { return (int32_t)g_setFc * g_rfc + (int32_t)g_setFs * g_rfs; }
 
 static void cb_on_damage(const uint8_t *p, int n);
+static void cb_on_engage(const uint8_t *p, int n);
 #include "savexfer.inc"
 #include "combat.inc"
 
