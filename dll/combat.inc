@@ -178,14 +178,15 @@ static int cb_my_hp(void) { int hp = -1; Ncs a; n_int_main_begin(&a); n_action(&
 static void cb_my_minhp(int v) { Ncs a; n_void_main_begin(&a); n_consti(&a, v); n_action(&a, R_GETPLAYER, 0); n_action(&a, 716, 2); cb_run("jbc_mm", &a); }
 static void cb_on_hits(const uint8_t *p, int n) {
     if (g_steamHost || n < 8 || !player_exists()) return; int32_t d; memcpy(&d, p + 4, 4); if (d <= 0 || d > 100000) return;
-    int before = cb_my_hp(); if (before >= 0 && d >= before && !(g_tune & 256)) cb_my_minhp(0);   /* the host's hit is lethal: let it kill (tune 256: tests keep the player alive) */
+    int before = g_cbMyHp >= 0 ? g_cbMyHp : cb_my_hp(); if (before >= 0 && d >= before && !(g_tune & 256)) cb_my_minhp(0);   /* the host's hit is lethal: let it kill (tune 256: tests keep the player alive) */
     /* EffectDamageHealth (#771), instant: SetHealth on the player changed what GetHealth reads but not the
        health bar, and the player did not die at 0 (owner, copy B); the damage effect moves the bar. */
     Ncs b; n_void_main_begin(&b); n_constf(&b, 0.0f); n_consti(&b, d); n_action(&b, 771, 1); n_consti(&b, 0); n_action(&b, R_GETPLAYER, 0); n_action(&b, R_APPLYEFFECT, 4); cb_run("jbc_ph", &b);
     /* the effect shows in GetHealth a little later: reading it right away gave the old value, and the
        heal-back then undid the host's hit (seen: B 70 with 57 host damage). Expect before - d instead,
        and don't judge for 600 ms */
-    g_cbHitsIn++; if (before >= 0) { g_cbMyHp = before - d; if (g_cbMyHp < 1) g_cbMyHp = 1; } else g_cbMyHp = -1; g_cbHitTick = GetTickCount();
+    /* expected health = previous expected - d (not 'health now - d': now may still hold a local hit not yet healed back) */
+    g_cbHitsIn++; if (g_cbMyHp >= 0) { g_cbMyHp -= d; if (g_cbMyHp < 1) g_cbMyHp = 1; } g_cbHitTick = GetTickCount();
 }
 /* guest: our enemies fight locally (animations), but only the host's hits count: local hits are healed
    back (EffectModifyHealth #746, instant), and a minimum health of 1 keeps a local hit from killing us */
