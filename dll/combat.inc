@@ -21,12 +21,22 @@
 #define CB_HSLOT 220      /* host enemies */
 #define CB_GSLOT 240      /* guest enemies */
 #define CB_TMP   219
-typedef struct { int used; int32_t tag; int16_t sx, sy; int hp, dead; int32_t x, y, z; } CbHost;
+typedef struct { int used; int32_t tag; int16_t sx, sy; int hp, dead; int32_t x, y, z; uint32_t oid; int onPup; } CbHost;
 typedef struct { int used; int32_t tag; int16_t sx, sy; int hp, dead; int32_t x, y, z; int match, lastSet; uint32_t pend, moveTick; } CbLocal;
 typedef struct { int valid; int32_t tag; int16_t sx, sy; int hp, dead; int32_t x, y, z; } CbRemote;
 static CbHost g_cbH[CB_MAX]; static CbLocal g_cbL[CB_MAX]; static CbRemote g_cbR[CB_MAX];
 static int g_cbInFight, g_cbEnumC, g_cbRead, g_cbNH, g_cbNL, g_cbHenchDone;
 static uint8_t g_cbFightId, g_cbRid; static uint32_t g_cbRtick;
+/* 0.11.0: host enemies fight the guest's puppet (RE, NOTES "RE: how an enemy picks its target").
+   A creature's combat target struct is at +0x58c; +0x5a4 (struct+0x18) is a wanted target that the
+   AI (FUN_004709c0 / FUN_00470470) takes when FUN_004bc760(enemy, wanted) passes. It failed for the
+   puppet only on the relation (neutral, 4); with ChangeToStandardFaction(puppet, FRIENDLY1) it is 2
+   and the enemy attacks the puppet (owner saw it, puppet health went down). So: the host gives each
+   enemy one of the two players (the nearer one, at least one enemy each when there are two), writes
+   the puppet's id into +0x5a4 every frame for the puppet's enemies, measures the puppet's health and
+   sends what it lost to the guest ('JEPH'), who takes it off its own player. */
+#define CB_ID_INVALID (*(volatile uint32_t *)0x0075B394)
+static uint32_t g_cbPupOid, g_cbPupTick, g_cbAssignTick, g_cbPupHits, g_cbPupDmg, g_cbHitsIn; static int g_cbPupHp = -1, g_cbPupMax;
 static uint32_t g_cbSnapTick, g_cbEnumTick, g_cbSnaps, g_cbSnapsIn, g_cbDmgSent, g_cbDmgApplied, g_cbKills, g_cbSets, g_cbMoves, g_cbFreezes;
 
 static uint32_t cb_watch_addr(int i) { return i ? (uint32_t)(uintptr_t)&g_cbH[0].used : (uint32_t)(uintptr_t)&g_cbInFight; }
@@ -72,6 +82,28 @@ static void cb_copy_tmp(int slot) { Ncs s; n_void_main_begin(&s); n_push_slot(&s
 static void cb_freeze(int slot) { Ncs s; n_void_main_begin(&s); n_consti(&s, 1); n_push_slot(&s, slot); n_action(&s, 935, 2); cb_run("jbc_frz", &s); g_cbFreezes++; }
 static void cb_set_health(int slot, int hp) { Ncs s; n_void_main_begin(&s); n_consti(&s, hp); n_push_slot(&s, slot); n_action(&s, 156, 2); cb_run("jbc_sh", &s); g_cbSets++; }
 static void cb_kill(int slot) { Ncs s; n_void_main_begin(&s); n_constf(&s, 0.0f); n_consti(&s, 0); n_action(&s, 927, 1); n_consti(&s, 0); n_push_slot(&s, slot); n_action(&s, R_APPLYEFFECT, 4); cb_run("jbc_kill", &s); g_cbKills++; }
+/* object id of the object in a slot: ObjectToString (#272) is its id in hex; parsed in NCS */
+static int cb_oid(int slot, uint32_t *out) {
+    Ncs s; n_int_main_begin(&s); n_consti(&s, 0); n_consti(&s, 8); n_consts(&s, "00000000"); n_push_slot(&s, slot);
+    n_action(&s, 272, 1); n_action(&s, 61, 1); nb(&s, 0x14); nb(&s, 0x23); n_action(&s, 62, 2);         /* h, right8("00000000" + lower(hex)) */
+    for (int i = 0; i < 8; i++) {
+        n_consti(&s, 1); n_consti(&s, i); n_cptopsp(&s, -12, 4); n_action(&s, 65, 3); n_consts(&s, "0123456789abcdef"); n_action(&s, 66, 2);
+        n_cptopsp(&s, -12, 4); n_consti(&s, 16); nb(&s, 0x16); nb(&s, 0x20); nb(&s, 0x14); nb(&s, 0x20); n_cpdownsp(&s, -12, 4); n_movsp(&s, -4);
+    }
+    n_cptopsp(&s, -8, 4); int v = 0; if (!cb_eval(&s, 12, &v)) return 0; *out = (uint32_t)v; return 1;
+}
+static uintptr_t cb_creature(uint32_t oid) {
+    int *app = *G_APP; void *srv = app ? *(void **)((char *)app + 0xA0) : 0; uint32_t id = oid;
+    uintptr_t c = (srv && oid && oid != CB_ID_INVALID) ? gcall(0x004611b0, (uint32_t)(uintptr_t)srv, 1, (uint32_t)(uintptr_t)&id, 0, 0) : 0;
+    return c && mem_readable(c + 0x588, 0x30) ? c : 0;
+}
+static void cb_pup_setup(void) {   /* the puppet becomes a valid target: FRIENDLY1, AI off, cannot die here */
+    Ncs a; n_void_main_begin(&a); n_consti(&a, 2); n_push_puppet(&a); n_action(&a, 412, 2); cb_run("jbc_pf", &a);
+    Ncs b; n_void_main_begin(&b); n_consti(&b, 1); n_push_puppet(&b); n_action(&b, 935, 2); cb_run("jbc_pa", &b);
+    Ncs c; n_void_main_begin(&c); n_consti(&c, 1); n_push_puppet(&c); n_action(&c, 716, 2); cb_run("jbc_pm", &c);
+}
+static int cb_pup_int(uint16_t r, int *out) { Ncs s; n_int_main_begin(&s); n_push_puppet(&s); n_action(&s, r, 1); return cb_eval(&s, 4, out); }
+static void cb_pup_refill(void) { Ncs s; n_void_main_begin(&s); n_push_puppet(&s); n_action(&s, 50, 1); n_push_puppet(&s); n_action(&s, 156, 2); cb_run("jbc_pr", &s); }
 static void cb_hench_out(void) { Ncs s; n_void_main_begin(&s); n_consti(&s, 1); n_action(&s, 326 /* GetSelectedHenchman */, 0); n_action(&s, 1045, 2); cb_run("jbc_hf", &s); }
 static void cb_move(int slot, float x, float y, float z, int run, int jump) {
     Ncs s; n_void_main_begin(&s); n_action(&s, R_CLEARALLACTIONS, 0);
@@ -95,13 +127,59 @@ static void cb_enum_step(int base, int guest) {
     cb_copy_tmp(base + j);
     int32_t tag = 0; cb_tag(base + j, &tag); int x = 0, y = 0; cb_slot_pos(base + j, 0, &x); cb_slot_pos(base + j, 1, &y);
     if (guest) { CbLocal *L = &g_cbL[j]; memset(L, 0, sizeof *L); L->used = 1; L->tag = tag; L->sx = (int16_t)(x / 100); L->sy = (int16_t)(y / 100); L->match = -1; L->lastSet = -1; g_cbNL++; cb_freeze(base + j); }
-    else { CbHost *H = &g_cbH[j]; memset(H, 0, sizeof *H); H->used = 1; H->tag = tag; H->sx = (int16_t)(x / 100); H->sy = (int16_t)(y / 100); g_cbNH++; }
+    else { CbHost *H = &g_cbH[j]; memset(H, 0, sizeof *H); H->used = 1; H->tag = tag; H->sx = (int16_t)(x / 100); H->sy = (int16_t)(y / 100); cb_oid(base + j, &H->oid); g_cbNH++; }
 }
 /* 0.10.1: also forget the host's last snapshot: after a reload the guest matched its new enemies to
    the dead ones of the previous fight (same tags, same places) and killed them */
-static void cb_reset(void) { memset(g_cbH, 0, sizeof g_cbH); memset(g_cbL, 0, sizeof g_cbL); memset(g_cbR, 0, sizeof g_cbR); g_cbRtick = 0; g_cbNH = g_cbNL = 0; g_cbEnumC = 0; g_cbHenchDone = 0; }
+static void cb_reset(void) { memset(g_cbH, 0, sizeof g_cbH); memset(g_cbL, 0, sizeof g_cbL); memset(g_cbR, 0, sizeof g_cbR); g_cbRtick = 0; g_cbPupOid = 0; g_cbPupHp = -1; g_cbPupTick = 0; g_cbNH = g_cbNL = 0; g_cbEnumC = 0; g_cbHenchDone = 0; }
 
+static void cb_send_hits(int d) { uint8_t q[12]; memcpy(q, "JEPH", 4); memcpy(q + 4, &d, 4); memset(q + 8, 0, 4); if (xf_send(q, 12)) g_cbPupHits++; g_cbPupDmg += (uint32_t)d; }
+static void cb_host_puppet(uint32_t now) {
+    if (g_tune & 64) return;                                   /* mutation runs: enemies never fight the puppet */
+    if (!g_puppetState) { g_cbPupOid = 0; return; }           /* no live puppet */
+    if (!g_cbPupOid || now - g_cbPupTick > 3000) {           /* (re)find it: it can be respawned */
+        g_cbPupTick = now; uint32_t o = 0; if (cb_oid(NET_SLOT, &o) && o != CB_ID_INVALID) { if (o != g_cbPupOid) { g_cbPupOid = o; cb_pup_setup(); g_cbPupHp = -1; } } }
+    if (!g_cbPupOid) return;
+    /* the puppet's health: what it lost goes to the guest, then it is refilled */
+    { int hp = 0; if (cb_pup_int(49, &hp)) {
+        if (g_cbPupHp < 0) { cb_pup_int(50, &g_cbPupMax); cb_pup_refill(); g_cbPupHp = g_cbPupMax; }
+        else if (hp < g_cbPupHp) { cb_send_hits(g_cbPupHp - hp); cb_pup_refill(); g_cbPupHp = g_cbPupMax; } } }
+    /* who fights whom, every second: each enemy takes the nearer player; with two or more enemies,
+       at least one each (the one nearest to the player who has none) */
+    if (now - g_cbAssignTick >= 1000) {
+        g_cbAssignTick = now; int px = 0, py = 0;
+        { Ncs a; n_int_main_begin(&a); n_action(&a, R_GETPLAYER, 0); n_pos_component(&a, 0); cb_eval(&a, 16, &px); }
+        { Ncs b; n_int_main_begin(&b); n_action(&b, R_GETPLAYER, 0); n_pos_component(&b, 1); cb_eval(&b, 16, &py); }
+        float qx = g_rxm / 1000.0f, qy = g_rym / 1000.0f; int nA = 0, nP = 0, live = 0;
+        for (int j = 0; j < CB_MAX; j++) { CbHost *H = &g_cbH[j]; if (!H->used || H->dead || (!H->x && !H->y)) continue; live++;
+            float ex = H->x / 1000.0f, ey = H->y / 1000.0f, da = (ex - px / 1000.0f) * (ex - px / 1000.0f) + (ey - py / 1000.0f) * (ey - py / 1000.0f),
+                  dp = (ex - qx) * (ex - qx) + (ey - qy) * (ey - qy);
+            if (H->onPup ? da + 9.0f < dp : dp + 9.0f < da) H->onPup = !H->onPup;   /* 3 m hysteresis (squared-ish) */
+            if (H->onPup) nP++; else nA++; }
+        if (live >= 2 && (nA == 0 || nP == 0)) {
+            int want = nP == 0, best = -1; float bd = 1e30f;
+            for (int j = 0; j < CB_MAX; j++) { CbHost *H = &g_cbH[j]; if (!H->used || H->dead) continue;
+                float ex = H->x / 1000.0f, ey = H->y / 1000.0f, tx = want ? qx : px / 1000.0f, ty = want ? qy : py / 1000.0f, d = (ex - tx) * (ex - tx) + (ey - ty) * (ey - ty);
+                if (d < bd) { bd = d; best = j; } }
+            if (best >= 0) g_cbH[best].onPup = want;
+        }
+    }
+    /* every frame: the puppet's enemies want the puppet; the others want nothing (the AI then takes the player) */
+    for (int j = 0; j < CB_MAX; j++) { CbHost *H = &g_cbH[j]; if (!H->used || H->dead || !H->oid) continue;
+        uintptr_t c = cb_creature(H->oid); if (!c) continue; volatile uint32_t *want = (volatile uint32_t *)(c + 0x5a4);
+        if (H->onPup) *want = g_cbPupOid; else if (*want == g_cbPupOid) *want = CB_ID_INVALID; }
+}
+/* guest: the host's enemies hit our puppet there -> take it off our player */
+static void cb_on_hits(const uint8_t *p, int n) {
+    if (g_steamHost || n < 8 || !player_exists()) return; int32_t d; memcpy(&d, p + 4, 4); if (d <= 0 || d > 100000) return;
+    int hp = 0; Ncs a; n_int_main_begin(&a); n_action(&a, R_GETPLAYER, 0); n_action(&a, 49, 1); if (!cb_eval(&a, 4, &hp)) return;
+    int nh = hp - d; if (nh < 0) nh = 0;
+    Ncs b; n_void_main_begin(&b); n_consti(&b, nh); n_action(&b, R_GETPLAYER, 0); n_action(&b, 156, 2); cb_run("jbc_ph", &b);
+    if (nh == 0) { Ncs c; n_void_main_begin(&c); n_constf(&c, 0.0f); n_consti(&c, 0); n_action(&c, 927, 1); n_consti(&c, 0); n_action(&c, R_GETPLAYER, 0); n_action(&c, R_APPLYEFFECT, 4); cb_run("jbc_pd", &c); }
+    g_cbHitsIn++;
+}
 static void cb_host_tick(uint32_t now) {
+    cb_host_puppet(now);
     /* enumerate (one candidate per frame) for the first 4 s of a fight and then every 2 s for 1 s */
     if (now - g_cbEnumTick < 4000 || ((now - g_cbEnumTick) % 2000) < 1000) cb_enum_step(CB_HSLOT, 0);
     /* read one enemy per frame */
@@ -193,6 +271,10 @@ static void cb_guest_tick(uint32_t now) {
 static int cb_used(void) { int n = 0; for (int j = 0; j < CB_MAX; j++) n += g_steamHost ? g_cbH[j].used : g_cbL[j].used; return n; }
 static void cb_log3(const char *what, int a, int b, int c2) { char m[200], t[16]; s_cpy(m, "combat: "); s_cat(m, what); s_cat(m, " ");
     i2s(t, a); s_cat(m, t); s_cat(m, " "); i2s(t, b); s_cat(m, t); s_cat(m, " "); i2s(t, c2); s_cat(m, t); s_cat(m, " stage "); s_cat(m, g_stage ? (const char *)g_stage : "?"); logline(m); }
+static void cb_fight_end(void) {   /* host: no wanted targets left behind */
+    for (int j = 0; j < CB_MAX; j++) { CbHost *H = &g_cbH[j]; if (!H->used || !H->oid) continue; uintptr_t c = cb_creature(H->oid);
+        if (c && g_cbPupOid && *(volatile uint32_t *)(c + 0x5a4) == g_cbPupOid) *(volatile uint32_t *)(c + 0x5a4) = CB_ID_INVALID; H->onPup = 0; }
+}
 static void cb_tick(void) {
     if (!g_useSteam || !g_steamOn || (g_tune & 128)) return;
     uint32_t now = GetTickCount();
@@ -202,7 +284,7 @@ static void cb_tick(void) {
     static int lastUsed; int u0 = cb_used(); if (lastUsed && !u0) cb_log3("table emptied before this tick: had, now, inFight", lastUsed, u0, g_cbInFight);
     static uint32_t lastCheck; if (now - lastCheck >= 500) { lastCheck = now; int f = cb_in_fight();
         if (f && !g_cbInFight) { cb_reset(); g_cbEnumTick = now; g_cbFightId++; logline(g_steamHost ? "combat: fight started (host)" : "combat: fight started (guest)"); }
-        if (!f && g_cbInFight) logline("combat: fight over");
+        if (!f && g_cbInFight) { if (g_steamHost) cb_fight_end(); logline("combat: fight over"); }
         g_cbInFight = f; g_cbShadow = f; }
     lastUsed = cb_used();
     if (!g_cbInFight) { lastUsed = cb_used(); return; }
@@ -219,5 +301,8 @@ static void cb_status(char *out) {
     s_cat(out, "],\"snaps\":"); u2s(a, g_cbSnaps); s_cat(out, a); s_cat(out, ",\"snapsIn\":"); u2s(a, g_cbSnapsIn); s_cat(out, a);
     s_cat(out, ",\"dmgSent\":"); u2s(a, g_cbDmgSent); s_cat(out, a); s_cat(out, ",\"dmgApplied\":"); u2s(a, g_cbDmgApplied); s_cat(out, a);
     s_cat(out, ",\"kills\":"); u2s(a, g_cbKills); s_cat(out, a); s_cat(out, ",\"sets\":"); u2s(a, g_cbSets); s_cat(out, a);
-    s_cat(out, ",\"moves\":"); u2s(a, g_cbMoves); s_cat(out, a); s_cat(out, ",\"freezes\":"); u2s(a, g_cbFreezes); s_cat(out, a); s_cat(out, "}");
+    s_cat(out, ",\"moves\":"); u2s(a, g_cbMoves); s_cat(out, a);
+    s_cat(out, ",\"onPuppet\":["); f = 1; for (int j = 0; j < CB_MAX; j++) if (g_cbH[j].used && g_cbH[j].onPup) { if (!f) s_cat(out, ","); f = 0; i2s(a, j); s_cat(out, a); } s_cat(out, "]");
+    s_cat(out, ",\"pupOid\":"); u2s(a, g_cbPupOid); s_cat(out, a); s_cat(out, ",\"pupHits\":"); u2s(a, g_cbPupHits); s_cat(out, a);
+    s_cat(out, ",\"pupDmg\":"); u2s(a, g_cbPupDmg); s_cat(out, a); s_cat(out, ",\"hitsIn\":"); u2s(a, g_cbHitsIn); s_cat(out, a); s_cat(out, ",\"freezes\":"); u2s(a, g_cbFreezes); s_cat(out, a); s_cat(out, "}");
 }

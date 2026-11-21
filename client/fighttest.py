@@ -7,12 +7,19 @@ B "hits" an enemy (health -4) -> A's enemy loses 4; A kills an enemy -> it dies 
 import json, sys, time
 import jeb, bot, ncs
 MUT = "--mutate" in sys.argv
+MUTE = "--mutate-engage" in sys.argv   # 0.11.0: host enemies never go for the puppet (tune 64)
+TUNE = 128 if MUT else 64 if MUTE else 0
 G = lambda: ncs.ACTION(ncs.R["GetPlayer"], 0)
 def A(): jeb.use("test_install")
 def B(): jeb.use("test_install_b")
 res = []
 def chk(n, ok, info): res.append(ok); print(("PASS " if ok else "FAIL ") + n + "  " + json.dumps(info), flush=True)
-def st(): return jeb.call("je.netStatus")["result"]
+def st():   # retry: one status reply in a run came back without its combat block (seen once, cause unknown)
+    for _ in range(5):
+        r = jeb.call("je.netStatus").get("result", {})
+        if "combat" in r: return r
+        time.sleep(0.3)
+    return r
 def ival(d): bot.load("jx_ft", d); return bot.ev("jx_ft")
 def hp(slot): return ival(ncs.slot_int(slot, 49))
 def dead(slot): return ival(ncs.slot_int(slot, 140))
@@ -32,10 +39,12 @@ if sys.argv[1] == "prep":
         # test only: the host's companion stays out too (SetHenchmanFollowPlayerInCombat(GetSelectedHenchman(), TRUE)),
         # or Dawn Star kills the enemies before the checks run
         bot.load("jx_hf", ncs.void_main(ncs.CONSTI(1) + ncs.ACTION(326, 0) + ncs.ACTION(1045, 2))); bot.run("jx_hf")
-    B(); jeb.call("je.netTune", {"value": 128 if MUT else 0})
+        # owner's ask: she still killed enemies in A at times: out of the world for the test (DeactivateHenchman, #311)
+        bot.load("jx_hd", ncs.void_main(ncs.ACTION(326, 0) + ncs.ACTION(311, 1))); bot.run("jx_hd")
+    B(); jeb.call("je.netTune", {"value": TUNE})
     print("prepared: start the fight in A, then in B"); sys.exit()
 A(); bot.setup(); B(); bot.setup()
-B(); jeb.call("je.netTune", {"value": 128 if MUT else 0})
+B(); jeb.call("je.netTune", {"value": TUNE})
 def matched():
     A(); h = st()["combat"]; B(); g = st()["combat"]
     alive = [e for e in h["host"] if not e[2] and e[1] > 0]
@@ -44,6 +53,21 @@ def matched():
 r = wait(matched, 15)
 A(); h = st()["combat"]; B(); g = st()["combat"]
 chk("both fight, B matched its enemies to A's", r is not None, {"A host": h["host"], "B local": g["local"], "B snapsIn": g["snapsIn"], "B freezes": g["freezes"]})
+# 0.11.0: on A one enemy goes for B's puppet, and what the puppet takes comes off B's player
+if r:
+    def split():
+        A(); h = st()["combat"]; alive = [e for e in h["host"] if not e[2]]
+        return h if h["onPuppet"] and len(h["onPuppet"]) < len(alive) else None
+    sp = wait(split, 10); A(); h = st()["combat"]
+    chk("A: the enemies split between A's player and B's puppet", sp is not None, {"onPuppet": h["onPuppet"], "host": h["host"], "pupOid": h["pupOid"]})
+    B(); bot.load("jx_rf", ncs.void_main(G() + ncs.ACTION(50, 1) + G() + ncs.ACTION(156, 2))); bot.run("jx_rf")   # refill B's health first
+    hb0 = ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4))
+    def hurt():
+        B(); g = st()["combat"]; hb = ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4))
+        return (g, hb) if g["hitsIn"] > 0 and hb < hb0 else None
+    e = wait(hurt, 20); A(); h = st()["combat"]; B(); g = st()["combat"]
+    chk("B's player loses health when A's enemy hits B's puppet", e is not None,
+        {"A pupHits": h["pupHits"], "A pupDmg": h["pupDmg"], "B hitsIn": g["hitsIn"], "B hp start": hb0, "B hp now": ival(ncs.int_main(G() + ncs.ACTION(49, 1), 4))})
 # 0.10.1: after a reload B killed its new enemies (matched to the previous fight's dead ones)
 if r:
     hd = {e[0]: e[2] for e in r[0]["host"]}

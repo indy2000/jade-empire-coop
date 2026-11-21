@@ -200,7 +200,7 @@ static BOOL (WINAPI *g_realPeek)(MSG_*, void*, unsigned, unsigned, unsigned);
 static uint16_t g_port;
 
 typedef struct { char method[48]; char resref[160]; const char *hex; int hexLen; char idtok[32]; uint32_t oid; int ival; int hasIval;
-                 char out[4096]; volatile int done; HANDLE ev; DWORD deadline; volatile int abandoned; } Req;
+                 uint32_t cf[5]; char out[4096]; volatile int done; HANDLE ev; DWORD deadline; volatile int abandoned; } Req;
 #define QMAX 32
 static Req *g_q[QMAX]; static int g_qn;
 
@@ -226,11 +226,26 @@ static int check_game(void) {
    violations (first few only) with the faulting address and the current stage. */
 static volatile const char *g_stage = "idle";
 static volatile int g_avLogged, g_watchLogged;
+static volatile uint32_t g_watchAddr; static uint32_t g_wsEip[16], g_wsCnt[16]; static int g_wseen;
 static volatile int g_inFrame, g_reenter;
+static uint32_t g_pin[4][2]; static int g_npin;
 static uint32_t cb_watch_addr(int i);   /* combat.inc */
 static HMODULE g_self;
 static long WINAPI veh(void *ep) {
     uint32_t **pp = (uint32_t **)ep; uint32_t *rec = pp[0]; uint32_t *ctx = pp[1];
+    if (rec[0] == 0x80000004 && (ctx[0x14 / 4] & 1) && g_watchAddr) {   /* re/target: who writes this address; each eip once */
+        uint32_t e = rec[3]; int k = 0; while (k < g_wseen && g_wsEip[k] != e) k++;
+        if (k < g_wseen) g_wsCnt[k]++;
+        else if (g_wseen < 16) { g_wsEip[g_wseen] = e; g_wsCnt[g_wseen++] = 1; char m[300], a[16]; uint32_t sp = ctx[0xC4 / 4];
+            s_cpy(m, "WATCH2: write to "); h2s(a, g_watchAddr); s_cat(m, a); s_cat(m, " by eip "); h2s(a, e); s_cat(m, a);
+            s_cat(m, " value "); h2s(a, *(volatile uint32_t *)(uintptr_t)g_watchAddr); s_cat(m, a); s_cat(m, " ebp "); h2s(a, ctx[0xB4 / 4]); s_cat(m, a); s_cat(m, " stack");
+            int got = 0; for (int i = 0; i < 96 && got < 14 && mem_readable(sp + i * 4, 4); i++) { uint32_t v = *(uint32_t *)(uintptr_t)(sp + i * 4);
+                if (v >= 0x00401000 && v < 0x006c0000) { s_cat(m, " "); h2s(a, v); s_cat(m, a); got++; } }   /* code addresses only: likely return addresses */
+            uint32_t bp = ctx[0xB4 / 4]; s_cat(m, " frames");
+            for (int i = 0; i < 6 && mem_readable(bp, 8); i++) { s_cat(m, " "); h2s(a, *(uint32_t *)(uintptr_t)(bp + 4)); s_cat(m, a); bp = *(uint32_t *)(uintptr_t)bp; }
+            logline(m); }
+        ctx[0x14 / 4] = 0; return -1;
+    }
     if (rec[0] == 0x80000004 && (ctx[0x14 / 4] & 3)) {        /* 0.10.0 debug: hardware write watch hit */
         if (g_watchLogged < 80) { g_watchLogged++;
             char m[200], a[16]; s_cpy(m, "WATCH: write to "); s_cat(m, (ctx[0x14 / 4] & 1) ? "g_cbInFight" : "g_cbH[0].used");
@@ -312,6 +327,29 @@ static void run_on_main(Req *r) {
         char a1[12]; s_cpy(r->out, "{\"result\":{\"creature\":"); u2s(a1, pc); s_cat(r->out, a1);
         s_cat(r->out, ",\"id\":"); u2s(a1, id); s_cat(r->out, a1); s_cat(r->out, ",\"obj\":"); u2s(a1, obj); s_cat(r->out, a1);
         s_cat(r->out, ",\"vec\":"); u2s(a1, vec); s_cat(r->out, a1); s_cat(r->out, "}}"); return;
+    }
+    if (s_eq(r->method, "je.creature")) {
+        /* RE helper (re/target): creature pointer for an object id (FUN_004611b0, thiscall on app+0xA0) */
+        int *app = *G_APP; void *srv = app ? *(void **)((char *)app + 0xA0) : 0; uint32_t id = r->oid;
+        uint32_t c = srv ? gcall(0x004611b0, (uint32_t)(uintptr_t)srv, 1, (uint32_t)(uintptr_t)&id, 0, 0) : 0;
+        char a1[12]; s_cpy(r->out, "{\"result\":{\"creature\":"); u2s(a1, c); s_cat(r->out, a1); s_cat(r->out, "}}"); return;
+    }
+    if (s_eq(r->method, "je.call")) {
+        /* RE helper (re/target, test copies only): call a game function, thiscall, ecx + up to 2 stack args.
+           Only addresses inside the game's code section. */
+        uint32_t fn = r->cf[0];
+        if (fn < 0x00401000 || fn >= 0x006c0000 || r->cf[2] > 2) { s_cpy(r->out, "{\"error\":{\"code\":-32602,\"message\":\"bad fn or n\"}}"); return; }
+        uint32_t rc = gcall(fn, r->cf[1], (int)r->cf[2], r->cf[3], r->cf[4], 0);
+        char a1[12]; s_cpy(r->out, "{\"result\":{\"eax\":"); u2s(a1, rc); s_cat(r->out, a1); s_cat(r->out, "}}"); return;
+    }
+    if (s_eq(r->method, "je.pin")) {
+        /* TEST HOOK (re/target, test copies only): write a dword every frame. oid = address (0 = clear all),
+           value = dword. Up to 4 pins. */
+        if (!r->oid) { g_npin = 0; s_cpy(r->out, "{\"result\":{\"pins\":0}}"); return; }
+        if (!mem_readable(r->oid, 4) || g_npin >= 4) { s_cpy(r->out, "{\"error\":{\"code\":-32004,\"message\":\"bad address or full\"}}"); return; }
+        g_pin[g_npin][0] = r->oid; g_pin[g_npin][1] = (uint32_t)r->ival; g_npin++;
+        *(volatile uint32_t *)(uintptr_t)r->oid = (uint32_t)r->ival;
+        char a1[12]; s_cpy(r->out, "{\"result\":{\"pins\":"); u2s(a1, (uint32_t)g_npin); s_cat(r->out, a1); s_cat(r->out, "}}"); return;
     }
     if (s_eq(r->method, "je.testSetDir")) {
         /* TEST HOOK (test copies): turn the local player by writing its orientation vector (creature+0x50),
@@ -411,7 +449,7 @@ static BOOL WINAPI hkPeek(MSG_ *m, void *h, unsigned a, unsigned b, unsigned f) 
         if (g_keepActive) *G_APPACTIVE = 1;
         /* 0.10.0: if the game pumps messages while one of our scripts runs, don't re-enter */
         if (g_inFrame) g_reenter++;
-        else { g_inFrame = 1; pump(); net_tick(); g_inFrame = 0; }
+        else { g_inFrame = 1; pump(); net_tick(); for (int i = 0; i < g_npin; i++) if (mem_readable(g_pin[i][0], 4)) *(volatile uint32_t *)(uintptr_t)g_pin[i][0] = g_pin[i][1]; g_inFrame = 0; }
     }
     return g_realPeek(m, h, a, b, f);
 }
@@ -478,11 +516,16 @@ static void handle_line(SOCKET s, char *line) {
         reply(s, idtok, out); return;
     }
     if (s_eq(method, "version")) {
-        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.10.1\",\"pid\":");
+        char out[300]; s_cpy(out, "{\"result\":{\"protocol\":1,\"game\":\"jadeempire\",\"build\":\"steam-1.00-1510\",\"server\":\"jebridge-c 0.11.0-re5\",\"pid\":");
         u2s(a, GetCurrentProcessId()); s_cat(out, a); s_cat(out, "}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "methods")) {
-        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.watch\",\"je.evalMany\"]}}"); return;
+        reply(s, idtok, "{\"result\":{\"methods\":[\"ping\",\"version\",\"methods\",\"je.state\",\"je.setDebugPanel\",\"je.runScript\",\"je.evalScript\",\"je.loadScript\",\"je.keepActive\",\"je.netStatus\",\"je.netPause\",\"je.netStart\",\"je.netTune\",\"je.peek\",\"je.playerPtr\",\"je.testSetDir\",\"je.watch\",\"je.evalMany\",\"je.creature\",\"je.pin\",\"je.call\",\"je.watchStats\"]}}"); return;
+    }
+    if (s_eq(method, "je.watchStats")) {   /* re/target: writer eips seen by the watch and how often */
+        char out[900]; s_cpy(out, "{\"result\":{\"writers\":[");
+        for (int k = 0; k < g_wseen; k++) { if (k) s_cat(out, ","); s_cat(out, "[\""); h2s(a, g_wsEip[k]); s_cat(out, a); s_cat(out, "\","); u2s(a, g_wsCnt[k]); s_cat(out, a); s_cat(out, "]"); }
+        s_cat(out, "]}}"); reply(s, idtok, out); return;
     }
     if (s_eq(method, "je.watch")) {   /* bridge thread: the main thread is suspended while its DR0/DR1 are set */
         /* DEBUG: hardware write watch on the combat flag/table from the bridge thread */
@@ -490,7 +533,9 @@ static void handle_line(SOCKET s, char *line) {
         if (!t) { reply(s, idtok, "{\"error\":{\"code\":-32004,\"message\":\"OpenThread failed\"}}"); return; }
         static uint32_t ctx[256]; SuspendThread(t); ctx[0] = 0x10010; /* CONTEXT_DEBUG_REGISTERS */
         int ok = GetThreadContext(t, ctx);
-        if (ok) { ctx[1] = cb_watch_addr(0); ctx[2] = cb_watch_addr(1); ctx[5] = 0; ctx[6] = 0x00DD0005;   /* L0 L1; RW0=01 LEN0=11 RW1=01 LEN1=11: write, 4 bytes */ ok = SetThreadContext(t, ctx); }
+        uint32_t wa = 0; jnum_field(line, "oid", &wa); g_watchAddr = wa; g_wseen = 0;
+        if (ok && wa) { ctx[1] = wa; ctx[5] = 0; ctx[6] = 0x000D0001; ok = SetThreadContext(t, ctx); }   /* re/target: one address, DR0, write, 4 bytes */
+        else if (ok) { ctx[1] = cb_watch_addr(0); ctx[2] = cb_watch_addr(1); ctx[5] = 0; ctx[6] = 0x00DD0005;   /* L0 L1; RW0=01 LEN0=11 RW1=01 LEN1=11: write, 4 bytes */ ok = SetThreadContext(t, ctx); }
         ResumeThread(t); CloseHandle(t);
         char out[160]; s_cpy(out, "{\"result\":{\"ok\":"); s_cat(out, ok ? "true" : "false"); s_cat(out, ",\"dr0\":\""); h2s(a, cb_watch_addr(0)); s_cat(out, a);
         s_cat(out, "\",\"dr1\":\""); h2s(a, cb_watch_addr(1)); s_cat(out, a); s_cat(out, "\"}}"); reply(s, idtok, out); return;
@@ -502,6 +547,7 @@ static void handle_line(SOCKET s, char *line) {
     if (!r.resref[0]) jstr_field(line, "names", r.resref, sizeof r.resref);
     { const char *h = s_str(line, "\"hex\""); if (h) { h += 5; while (*h == ' ' || *h == ':') h++; if (*h == '"') { h++; r.hex = h; while (h[r.hexLen] && h[r.hexLen] != '"') r.hexLen++; } } }
     r.oid = 0x7F000000; jnum_field(line, "oid", &r.oid);
+    jnum_field(line, "fn", &r.cf[0]); jnum_field(line, "ecx", &r.cf[1]); jnum_field(line, "n", &r.cf[2]); jnum_field(line, "a", &r.cf[3]); jnum_field(line, "b", &r.cf[4]);
     { uint32_t v; if (jnum_field(line, "value", &v)) { r.ival = (int)v; r.hasIval = 1; } }
     uint32_t tmo = 30000; jnum_field(line, "timeoutMs", &tmo);
     r.deadline = GetTickCount() + tmo; r.ev = CreateEventA(0, 1, 0, 0);

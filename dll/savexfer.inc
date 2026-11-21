@@ -118,6 +118,7 @@ static void xf_recv(uint32_t now) {
         if (from == g_speer && n >= 8) {
             if (!mem4(p, "JEQS") && g_steamHost) { g_xReqs++; if (g_xstate == 0) { if (player_exists()) xf_host_begin(); else logline("save: guest asked, but the host has no game loaded yet"); } }
             else if (!mem4(p, "JEDM")) cb_on_damage(p, n);      /* 0.10.0: guest damage request */
+            else if (!mem4(p, "JEPH")) cb_on_hits(p, n);        /* 0.11.0: host enemies hit our puppet */
             else if (!mem4(p, "JESH") && !g_steamHost && n >= 12 + 80) {
                 memcpy(&g_xid, p + 4, 4);
                 for (int f = 0; f < 2; f++) { memcpy(&g_xsize[f], p + 12 + 40 * f + 32, 4); memcpy(&g_xcrc[f], p + 12 + 40 * f + 36, 4); g_xgot[f] = 0; }
